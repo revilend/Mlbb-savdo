@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Bot ma'lumotlari
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Maxfiy sozlamalar (.env.example / env.example qoladi)
+.env
+.env.*
+!.env.example
