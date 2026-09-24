@@ -24,9 +24,12 @@ from middlewares import messages as message_registry
 from middlewares import permanent, sweep_chat, temporary
 from keyboards import (
     admin_panel_kb,
+    guide_kb,
+    listing_action_kb,
     main_menu_kb,
     subscribe_kb,
     BTN_CANCEL,
+    BTN_GUIDE,
     BTN_STATS,
 )
 
@@ -72,6 +75,39 @@ ADMIN_PANEL_TEXT = (
     "Kerakli amalni tanlang 👇"
 )
 
+GUIDE_TEXT = (
+    "❓ <b>QOʻLLANMA — xavfsiz savdo qoidalari</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n\n"
+    "<b>1️⃣ Akkauntni xavfsiz sotib olish va topshirish</b>\n"
+    "Moonton akkaunti <b>email</b> ga bogʻlangan, shu sababli topshirish tartibi:\n"
+    "• Sotuvchi xaridorga akkauntning <b>email</b> va parolini beradi;\n"
+    "• Xaridor darhol Moonton saytida (yoki oʻyinda) <b>parolni</b> va "
+    "<b>email</b> ni oʻziga oʻzgartiradi;\n"
+    "• <b>Barcha 3-tomon tarmoqlarini uzish</b>: Google, Facebook, TikTok/Discord va "
+    "boshqa bogʻlanishlarni «Account Settings → Linked accounts» boʻlimidan "
+    "uzib chiqing;\n"
+    "• Emailga keladigan tasdiqlash kodlari xaridorga oʻtishi shart;\n"
+    "• Akkauntni <b>faqat bitta qurilmada</b> sinab koʻring va 24 soat "
+    "kuzatib turing — bu vaqt ichida egasi tiklab olishga urinishi mumkin.\n\n"
+    "<b>2️⃣ Garant xizmatidan foydalanish qoidalari</b>\n"
+    "• Kelishuv puli avval <b>garant</b>ga (vositachi) topshiriladi;\n"
+    "• Garant pulni olgach, sotuvchi akkauntni topshiradi;\n"
+    "• Xaridor akkauntni tekshirib tasdiqlagach, garant pulni sotuvchiga beradi;\n"
+    "• Nizo boʻlsa, garant yozishmalar va dalillar asosida qaror qabul qiladi;\n"
+    "• Garantsiz oldindan toʻlov qilish — eng koʻp uchraydigan firibgarlik sababi.\n\n"
+    "<b>3️⃣ Botda eʼlon berish va narx tushirish</b>\n"
+    "• «💰 Akkaunt sotish» → <b>Sotish</b> yoki <b>Almashish (Barter)</b> rejimini tanlang;\n"
+    "• Anketani toʻldiring: rank → skinlar → narx → VIP → aloqa → izoh → rasmlar;\n"
+    "• Moderator tasdiqlagach eʼlon kanalga chiqadi;\n"
+    "• «📋 Mening eʼlonlarim» boʻlimida narxni <b>tushirishingiz</b> mumkin — "
+    "eski narx ustidan chizilib, yangisi ajratib koʻrsatiladi va eʼlonni "
+    "sevimlilarga saqlaganlarga darhol xabar boradi;\n"
+    "• Eʼlonni <b>24 soatda bir marta</b> koʻtarish (UP) mumkin;\n"
+    "• Sotilgach «✅ Sotildi deb belgilash» tugmasini bosishni unutmang.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "🛡️ Shubhali foydalanuvchini «🛡️ Firibgarni tekshirish» boʻlimida tekshiring."
+)
+
 
 # ---------------------------------------------------------------------------
 # Yordamchi funksiyalar
@@ -88,6 +124,11 @@ def user_label(user_id: int, username: Optional[str] = None, full_name: Optional
     if full_name:
         return full_name
     return f"ID: {user_id}"
+
+
+def is_admin(user_id: Optional[int]) -> bool:
+    """Foydalanuvchi administrator ekanmi (bot ichida qo'shilganlar ham)."""
+    return db.is_admin(user_id)
 
 
 def user_link(user_id: int, full_name: Optional[str] = None) -> str:
@@ -168,6 +209,8 @@ def build_hashtags(listing: dict[str, Any]) -> str:
         tags.append("#VIP")
     if listing.get("listing_type") == "buy":
         tags.append("#Xaridor")
+    elif is_trade(listing):
+        tags.append("#Almashish")
     else:
         tags.append("#Sotiladi")
 
@@ -189,6 +232,20 @@ def build_hashtags(listing: dict[str, Any]) -> str:
     return " ".join(tags)
 
 
+def default_header(listing: dict[str, Any]) -> str:
+    """E'lon turiga mos sarlavha."""
+    if listing.get("listing_type") == "buy":
+        return "🛒 <b>AKKAUNT SOTIB OLINADI</b>"
+    if is_trade(listing):
+        return "🔄 <b>AKKAUNT ALMASHISH (BARTER)</b>"
+    return "💰 <b>AKKAUNT SOTILADI</b>"
+
+
+def is_trade(listing: dict[str, Any]) -> bool:
+    """E'lon barter (almashish) rejimidami?"""
+    return str(listing.get("listing_mode") or "sell").lower() == "trade"
+
+
 def format_listing_caption(
     listing: dict[str, Any],
     header: Optional[str] = None,
@@ -197,27 +254,40 @@ def format_listing_caption(
     """E'lon kartochkasi matnini tayyorlaydi."""
     listing_type = listing.get("listing_type", "sell")
     is_buy = listing_type == "buy"
+    trade = is_trade(listing)
 
     lines: list[str] = []
-    if header:
-        lines.append(header)
-        lines.append("")
+    lines.append(header or default_header(listing))
+    lines.append("")
 
     lines.append(f"🆔 Eʼlon raqami: <b>#{listing.get('id')}</b>")
-    lines.append(f"📌 Turi: <b>{'🛒 Sotib olinadi' if is_buy else '💰 Sotiladi'}</b>")
+    if not trade:
+        lines.append(f"📌 Turi: <b>{'🛒 Sotib olinadi' if is_buy else '💰 Sotiladi'}</b>")
     if listing.get("is_vip"):
         lines.append("💎 <b>VIP eʼlon</b>")
     lines.append(f"🏆 Rank: {esc(listing.get('rank_info') or '—')}")
     lines.append(f"🎭 Skinlar: {esc(listing.get('skins_info') or '—')}")
-    lines.append(
-        "💵 Narx: <b>{}</b>".format(
-            esc(listing.get("price_display") or format_price(listing.get("price_numeric")))
-        )
+
+    new_price = esc(
+        listing.get("price_display") or format_price(listing.get("price_numeric"))
     )
+    if trade:
+        lines.append(f"🎯 Talab: <b>{esc(listing.get('trade_wanted') or 'Kelishiladi')}</b>")
+    elif listing.get("old_price"):
+        # Narx tushirilganda eski narx ustidan chizilib, yangisi ajratiladi
+        lines.append(f"🔥 NARX TUSHDI: ~{esc(listing.get('old_price'))}~ ➔ <b>{new_price}</b>")
+    else:
+        lines.append(f"💵 Narx: <b>{new_price}</b>")
+
     if listing.get("description"):
         lines.append(f"📝 Izoh: {esc(listing['description'])}")
     if seller_label:
-        role = "Xaridor" if is_buy else "Sotuvchi"
+        if is_buy:
+            role = "Xaridor"
+        elif trade:
+            role = "Egasi"
+        else:
+            role = "Sotuvchi"
         lines.append(f"👤 {role}: {esc(seller_label)}")
     if listing.get("contact"):
         lines.append(f"🔗 Aloqa: {esc(listing['contact'])}")
@@ -235,29 +305,31 @@ def format_listing_caption(
 
 
 async def get_channel_id() -> str:
-    """E'lonlar joylanadigan kanal ID si."""
-    stored = await db.get_setting("required_channel")
-    return (stored or config.DEFAULT_CHANNEL_ID or "").strip()
+    """E'lonlar joylanadigan kanal (admin panelda sozlanadi)."""
+    return await db.get_post_channel()
 
 
 async def get_channel_link() -> str:
-    """Majburiy kanal uchun havola."""
-    stored = await db.get_setting("required_channel_link")
-    if stored:
-        return stored.strip()
+    """E'lon kanali uchun havola."""
+    return await db.get_post_channel_link()
 
-    channel = await get_channel_id()
-    if channel.startswith("@"):
-        return f"https://t.me/{channel.lstrip('@')}"
-    return ""
+
+async def get_required_channel() -> str:
+    """Majburiy a'zolik kanali."""
+    return await db.get_required_channel()
+
+
+async def get_required_channel_link() -> str:
+    """Majburiy kanal uchun havola."""
+    return await db.get_required_channel_link()
 
 
 async def check_sub(bot: Bot, user_id: int) -> bool:
     """Foydalanuvchi majburiy kanalga a'zo ekanligini tekshiradi."""
-    if user_id == config.ADMIN_ID:
+    if db.is_admin(user_id):
         return True
 
-    channel = await get_channel_id()
+    channel = await get_required_channel()
     if not channel:
         return True
 
@@ -367,17 +439,21 @@ async def edit_listing_card(
 
 
 async def notify_admin(bot: Bot, text: str, markup: Any = None) -> Optional[Message]:
-    """Adminga xabar yuboradi (xatolikni yutadi)."""
-    try:
-        return await bot.send_message(
-            config.ADMIN_ID,
-            text[:TEXT_LIMIT],
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
-    except TelegramAPIError as exc:
-        logger.error("Adminga xabar yuborilmadi: %s", exc)
-        return None
+    """Barcha adminlarga xabar yuboradi (xatoliklarni yutadi)."""
+    first: Optional[Message] = None
+    for admin_id in db.get_admin_ids():
+        try:
+            message = await bot.send_message(
+                admin_id,
+                text[:TEXT_LIMIT],
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+            if first is None:
+                first = message
+        except TelegramAPIError as exc:
+            logger.error("Adminga (%s) xabar yuborilmadi: %s", admin_id, exc)
+    return first
 
 
 async def safe_delete(bot: Bot, chat_id: int | str, message_id: Optional[int]) -> None:
@@ -422,7 +498,11 @@ def menu_button_guard(message: Message) -> bool:
 # ---------------------------------------------------------------------------
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
-    """/start — foydalanuvchini ro'yxatga oladi va menyuni ko'rsatadi."""
+    """/start — foydalanuvchini ro'yxatga oladi va menyuni ko'rsatadi.
+
+    `?start=view_{id}` ko'rinishidagi havola (ulashish tugmasi) bosilsa,
+    foydalanuvchiga o'sha e'lon ko'rsatiladi.
+    """
     await state.clear()
     user = message.from_user
     if user is None:
@@ -436,11 +516,11 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
         return
 
     if not await check_sub(bot, user.id):
-        channel = await get_channel_id()
+        channel = await get_required_channel()
         channel_name = channel if channel.startswith("@") else "kanal"
         await message.answer(
             UNSUB_TEXT.format(channel=esc(channel_name)),
-            reply_markup=subscribe_kb(await get_channel_link()),
+            reply_markup=subscribe_kb(await get_required_channel_link()),
         )
         return
 
@@ -449,6 +529,41 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
             WELCOME_TEXT.format(name=esc(user.full_name or user.first_name or "doʻstim")),
             reply_markup=main_menu_kb(),
         )
+
+    await send_shared_listing(message, bot)
+
+
+async def send_shared_listing(message: Message, bot: Bot) -> None:
+    """Ulashilgan havola (`/start view_{id}`) orqali kelgan e'lonni ko'rsatadi."""
+    command_args = (message.text or "").split(maxsplit=1)
+    payload = command_args[1].strip() if len(command_args) > 1 else ""
+    if not payload.startswith("view_"):
+        return
+
+    raw_id = payload.split("_", 1)[-1]
+    if not raw_id.isdigit():
+        return
+
+    listing = await db.get_listing(int(raw_id))
+    if listing is None or listing.get("status") not in ("active", "sold", "found"):
+        await message.answer(
+            "😔 Afsuski, bu eʼlon topilmadi yoki allaqachon olib tashlangan.\n\n"
+            "«🎲 Tasodifiy akkaunt» boʻlimida boshqa eʼlonlarni koʻrishingiz mumkin.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    markup = listing_action_kb(listing) if listing.get("status") == "active" else None
+    try:
+        await send_listing_card(
+            bot,
+            message.chat.id,
+            listing,
+            markup=markup,
+            seller_label=await seller_label_of(listing),
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Ulashilgan eʼlon #%s yuborilmadi: %s", raw_id, exc)
 
 
 @router.message(Command("help"))
@@ -551,11 +666,29 @@ async def show_stats(message: Message) -> None:
     )
 
 
+@router.message(StateFilter(None), F.text == BTN_GUIDE)
+async def show_guide(message: Message) -> None:
+    """«❓ Qoʻllanma» — xavfsiz savdo qo'llanmasi."""
+    with permanent():
+        await message.answer(
+            GUIDE_TEXT,
+            reply_markup=guide_kb(),
+            disable_web_page_preview=True,
+        )
+
+
+@router.message(Command("guide"))
+async def cmd_guide(message: Message) -> None:
+    """/guide — qo'llanmani ko'rsatadi."""
+    with permanent():
+        await message.answer(GUIDE_TEXT, reply_markup=guide_kb(), disable_web_page_preview=True)
+
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext) -> None:
     """/admin — admin panelni ochadi."""
     user = message.from_user
-    if user is None or user.id != config.ADMIN_ID:
+    if user is None or not is_admin(user.id):
         await message.answer("⛔️ Bu buyruq faqat administrator uchun.")
         return
 

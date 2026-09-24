@@ -6,11 +6,13 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class SellFSM(StatesGroup):
-    """Akkaunt sotish anketasi."""
+    """Akkaunt sotish yoki almashtirish (barter) anketasi."""
 
+    mode = State()          # '💰 Sotish' yoki '🔄 Almashish'
     rank = State()
     skins = State()
-    price = State()
+    price = State()         # faqat 'sell' rejimida
+    trade_wanted = State()  # faqat 'trade' rejimida
     is_vip = State()
     contact = State()
     description = State()
@@ -32,6 +34,12 @@ class OfferFSM(StatesGroup):
     waiting_amount = State()
 
 
+class PriceDropFSM(StatesGroup):
+    """E'lon narxini tushirish (chegirma)."""
+
+    waiting_new_price = State()
+
+
 class CalcFSM(StatesGroup):
     """Akkaunt narxini hisoblash."""
 
@@ -51,7 +59,9 @@ class AdminFSM(StatesGroup):
     """Administrator amallari."""
 
     broadcast_content = State()
-    set_channel_input = State()
+    set_channel_input = State()   # e'lon kanali yoki majburiy kanal (data orqali)
+    add_admin_id = State()
+    remove_admin_id = State()
     lookup_user_id = State()
     send_direct_msg_text = State()
     ban_identifier = State()

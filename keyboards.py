@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional
+from urllib.parse import quote
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -17,6 +18,43 @@ from aiogram.types import (
 )
 
 import config
+
+# ---------------------------------------------------------------------------
+# Bot username'i
+# ---------------------------------------------------------------------------
+#: `main.py` ishga tushganda `bot.get_me()` natijasi bilan to'ldiriladi.
+#: Ulashish (share) havolalari shu qiymatga tayanadi.
+BOT_USERNAME: str = config.BOT_USERNAME
+
+
+def set_bot_username(username: Optional[str]) -> None:
+    """Botning username ini o'rnatadi (ishga tushishda chaqiriladi)."""
+    global BOT_USERNAME
+    BOT_USERNAME = (username or "").lstrip("@").strip()
+
+
+def bot_deep_link(payload: str) -> str:
+    """Bot uchun deep-link yasaydi (`?start=payload`)."""
+    if not BOT_USERNAME:
+        return ""
+    return f"https://t.me/{BOT_USERNAME}?start={payload}"
+
+
+def share_url(listing_id: int) -> str:
+    """E'lonni do'stlarga ulashish uchun Telegram share havolasi.
+
+    `https://t.me/share/url?url=...&text=...` ko'rinishida — bo'shliqlar
+    `%20`, `!` esa o'z joyida qoladi (Telegram aynan shunday kutadi).
+    """
+    text = "Mobile Legends akkaunt sotilmoqda!"
+    deep_link = bot_deep_link(f"view_{listing_id}")
+    encoded_text = quote(text, safe="!")
+    if deep_link:
+        # Deep-link ichidagi `?` va `=` belgilarini ham kodlaymiz
+        return f"https://t.me/share/url?url={quote(deep_link, safe='')}&text={encoded_text}"
+    # Username hali noma'lum bo'lsa — faqat matn bilan ulashamiz
+    return f"https://t.me/share/url?text={encoded_text}"
+
 
 # ---------------------------------------------------------------------------
 # Reply tugmalar matni
@@ -31,6 +69,7 @@ BTN_SCAM = "🛡️ Firibgarni tekshirish"
 BTN_MY_LISTINGS = "📋 Mening eʼlonlarim"
 BTN_GARANT = "🛡️ Garant xizmati"
 BTN_STATS = "📊 Statistika"
+BTN_GUIDE = "❓ Qoʻllanma"
 
 BTN_CANCEL = "❌ Bekor qilish"
 BTN_DONE = "✅ Tayyor"
@@ -41,6 +80,7 @@ MAIN_MENU_ROWS: list[list[str]] = [
     [BTN_FAVORITES, BTN_CALC],
     [BTN_SCAM, BTN_MY_LISTINGS],
     [BTN_GARANT, BTN_STATS],
+    [BTN_GUIDE],
 ]
 
 ALL_MENU_BUTTONS: set[str] = {button for row in MAIN_MENU_ROWS for button in row}
@@ -72,6 +112,13 @@ def contact_url(contact: str, fallback_username: str = "") -> str:
 
     username = (fallback_username or config.GARANT_USERNAME).lstrip("@").strip()
     return f"https://t.me/{username}"
+
+
+def share_button(listing_id: int) -> InlineKeyboardButton:
+    """«Do'stlarga ulashish» tugmasi."""
+    return InlineKeyboardButton(
+        text="↗️ Doʻstlarga ulashish", url=share_url(listing_id)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,21 +167,40 @@ def subscribe_kb(channel_link: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def sell_mode_kb() -> InlineKeyboardMarkup:
+    """Sotish yoki almashtirish (barter) rejimini tanlash."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💰 Sotish", callback_data="mode_sell")],
+            [InlineKeyboardButton(text="🔄 Almashish (Barter)", callback_data="mode_trade")],
+        ]
+    )
+
+
 def listing_action_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
     """Katalog va kanal uchun e'lon amallari klaviaturasi."""
     listing_id = listing["id"]
     listing_type = listing.get("listing_type", "sell")
+    is_trade = listing.get("listing_mode") == "trade"
 
     if listing_type == "buy":
         first_text = "🛡️ Admin orqali bogʻlanish"
         contact_text = "👤 Xaridor bilan aloqa"
+    elif is_trade:
+        first_text = "🛡️ Admin orqali almashish"
+        contact_text = "👤 Egasi bilan aloqa"
     else:
         first_text = "🛡️ Admin orqali sotib olish"
         contact_text = "👤 Sotuvchi bilan aloqa"
 
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text=first_text, callback_data=f"deal_{listing_id}")],
-        [InlineKeyboardButton(text="💬 Narx taklif qilish", callback_data=f"offer_{listing_id}")],
+        [
+            InlineKeyboardButton(
+                text="💬 Taklif yuborish" if is_trade else "💬 Narx taklif qilish",
+                callback_data=f"offer_{listing_id}",
+            )
+        ],
         [
             InlineKeyboardButton(text="⭐️ Saqlab qoʻyish", callback_data=f"fav_{listing_id}"),
             InlineKeyboardButton(
@@ -142,6 +208,7 @@ def listing_action_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
                 url=contact_url(str(listing.get("contact") or "")),
             ),
         ],
+        [share_button(listing_id)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -159,22 +226,35 @@ def price_filter_kb() -> InlineKeyboardMarkup:
     )
 
 
-def my_listing_kb(listing_id: int) -> InlineKeyboardMarkup:
-    """Mening e'lonlarim uchun amallar."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Sotildi deb belgilash", callback_data=f"sold_{listing_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Eʼlonni koʻtarish (UP)", callback_data=f"bump_{listing_id}"
-                )
-            ],
-        ]
+def my_listing_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
+    """Mening e'lonlarim uchun amallar.
+
+    «📉 Narxni tushirish» faqat aktiv va narxi bo'lgan (barter/so'rov emas)
+    e'lonlar uchun ko'rsatiladi.
+    """
+    listing_id = int(listing["id"])
+    status = str(listing.get("status") or "")
+    is_sell = (
+        listing.get("listing_type", "sell") != "buy"
+        and listing.get("listing_mode", "sell") != "trade"
+        and bool(listing.get("price_numeric"))
     )
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="✅ Sotildi deb belgilash", callback_data=f"sold_{listing_id}")]
+    ]
+
+    if status == "active" and is_sell:
+        rows.append(
+            [InlineKeyboardButton(text="📉 Narxni tushirish", callback_data=f"drop_price_{listing_id}")]
+        )
+
+    rows.append(
+        [InlineKeyboardButton(text="🔄 Eʼlonni koʻtarish (UP)", callback_data=f"bump_{listing_id}")]
+    )
+    rows.append([share_button(listing_id)])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def moderation_kb(listing_id: int) -> InlineKeyboardMarkup:
@@ -200,13 +280,52 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📊 Toʻliq statistika", callback_data="adm_stats"),
             ],
             [
-                InlineKeyboardButton(text="⚙️ Majburiy kanal", callback_data="adm_sub_channel"),
+                InlineKeyboardButton(text="📡 Kanallar boshqaruvi", callback_data="adm_sub_channel"),
+                InlineKeyboardButton(text="👥 Adminlar", callback_data="adm_admins"),
+            ],
+            [
                 InlineKeyboardButton(text="👤 Foydalanuvchi qidirish", callback_data="adm_lookup"),
+                InlineKeyboardButton(text="📊 Bugungi hisobot", callback_data="adm_today"),
             ],
             [
                 InlineKeyboardButton(text="🚫 Qora roʻyxatga kiritish", callback_data="adm_ban"),
                 InlineKeyboardButton(text="📋 Qora roʻyxat", callback_data="adm_blacklist"),
             ],
+        ]
+    )
+
+
+def admins_kb() -> InlineKeyboardMarkup:
+    """Adminlarni boshqarish klaviaturasi."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Admin qoʻshish", callback_data="adm_add_admin")],
+            [InlineKeyboardButton(text="➖ Admin oʻchirish", callback_data="adm_remove_admin")],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_back")],
+        ]
+    )
+
+
+def channels_kb(
+    post_set: bool = False,
+    required_set: bool = False,
+) -> InlineKeyboardMarkup:
+    """Kanallar boshqaruvi klaviaturasi."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=("✅ " if post_set else "📣 ") + "Eʼlon kanali",
+                    callback_data="adm_post_channel",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=("✅ " if required_set else "🔒 ") + "Majburiy kanal",
+                    callback_data="adm_sub_required",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_back")],
         ]
     )
 
@@ -267,6 +386,30 @@ def garant_kb() -> InlineKeyboardMarkup:
                     url=config.GARANT_URL,
                 )
             ]
+        ]
+    )
+
+
+def guide_kb() -> InlineKeyboardMarkup:
+    """Qo'llanma klaviaturasi."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🛡️ Garant bilan bogʻlanish: @{config.GARANT_USERNAME}",
+                    url=config.GARANT_URL,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➕ Kanaldagi eʼlonlarni koʻrish",
+                    url=(
+                        f"https://t.me/{config.DEFAULT_CHANNEL_ID.lstrip('@')}"
+                        if config.DEFAULT_CHANNEL_ID.startswith("@")
+                        else config.GARANT_URL
+                    ),
+                )
+            ],
         ]
     )
 

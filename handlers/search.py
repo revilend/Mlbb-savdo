@@ -187,17 +187,22 @@ async def search_contact(message: Message, state: FSMContext, bot: Bot) -> None:
         reply_markup=main_menu_kb(),
     )
 
-    try:
-        await send_listing_card(
-            bot,
-            config.ADMIN_ID,
-            listing,
-            markup=moderation_kb(listing_id),
-            header="🆕 <b>Yangi xaridor soʻrovi (moderatsiya)</b>",
-            seller_label=user_label(user.id, user.username, user.full_name),
-        )
-    except TelegramAPIError as exc:
-        logger.error("Xaridor so'rovini adminga yuborishda xatolik: %s", exc)
+    failed = False
+    for admin_id in db.get_admin_ids():
+        try:
+            await send_listing_card(
+                bot,
+                admin_id,
+                listing,
+                markup=moderation_kb(listing_id),
+                header="🆕 <b>Yangi xaridor soʻrovi (moderatsiya)</b>",
+                seller_label=user_label(user.id, user.username, user.full_name),
+            )
+        except TelegramAPIError as exc:
+            failed = True
+            logger.error("Xaridor so'rovini adminga (%s) yuborishda xatolik: %s", admin_id, exc)
+
+    if failed:
         await notify_admin(
             bot,
             f"⚠️ #{listing_id} soʻrovini yuborishda xatolik yuz berdi.",

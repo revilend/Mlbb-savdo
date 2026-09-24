@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 from database import db
 from handlers.common import (
+    default_header,
     esc,
     format_price,
     menu_button_guard,
@@ -31,6 +32,7 @@ from keyboards import (
     moderation_kb,
     photos_kb,
     rank_kb,
+    sell_mode_kb,
     skip_kb,
     vip_kb,
 )
@@ -45,6 +47,18 @@ INTRO_TEXT = (
     "Bir necha savolga javob bering — eʼloningiz moderator tekshiruvidan soʻng "
     "kanalga chiqadi.\n\n"
     "Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing."
+)
+
+MODE_ASK = (
+    "🤝 <b>Avval qanday eʼlon joylashni xohlaysiz?</b>\n\n"
+    "💰 <b>Sotish</b> — akkauntni pulga sotasiz.\n"
+    "🔄 <b>Almashish (Barter)</b> — akkauntingizni boshqa akkauntga almashtirasiz."
+)
+
+TRADE_ASK = (
+    "3️⃣ <b>Qanday akkauntga alishmoqchisiz?</b>\n\n"
+    "Masalan: <i>Ling Collector yoki KOF boʻlsa alishaman</i>\n"
+    "Yoki: <i>Mythic Glory + 100kof akkaunt kerak</i>"
 )
 
 RANK_ASK = (
@@ -108,12 +122,30 @@ async def ask_photos(message: Message, state: FSMContext) -> None:
 # ---------------------------------------------------------------------------
 @router.message(StateFilter(None), F.text == BTN_SELL)
 async def start_sell(message: Message, state: FSMContext) -> None:
-    """Sotish anketasini boshlaydi."""
+    """Sotish anketasini boshlaydi: avval rejim (sotish/almashish) tanlanadi."""
     await state.clear()
-    await state.set_state(SellFSM.rank)
-    await state.update_data(photos=[])
+    await state.set_state(SellFSM.mode)
+    await state.update_data(photos=[], listing_mode="sell", trade_wanted=None)
     await _ask(message, INTRO_TEXT, markup=cancel_kb())
-    await _ask(message, RANK_ASK, markup=rank_kb("srank"))
+    await _ask(message, MODE_ASK, markup=sell_mode_kb())
+
+
+@router.callback_query(SellFSM.mode, F.data.in_(["mode_sell", "mode_trade"]))
+async def sell_mode_cb(callback: CallbackQuery, state: FSMContext) -> None:
+    """Rejim tanlandi: «💰 Sotish» yoki «🔄 Almashish (Barter)»."""
+    mode = "trade" if (callback.data or "") == "mode_trade" else "sell"
+    await state.update_data(listing_mode=mode)
+    await callback.answer(
+        "🔄 Almashish rejimi" if mode == "trade" else "💰 Sotish rejimi"
+    )
+
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramAPIError:
+            pass
+        await state.set_state(SellFSM.rank)
+        await _ask(callback.message, RANK_ASK, markup=rank_kb("srank"))
 
 
 @router.callback_query(SellFSM.rank, F.data.startswith("srank_"))
@@ -184,8 +216,38 @@ async def sell_skins(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(skins_info=text[:200])
+
+    data = await state.get_data()
+    if data.get("listing_mode") == "trade":
+        await state.set_state(SellFSM.trade_wanted)
+        await message.answer(TRADE_ASK)
+        return
+
     await state.set_state(SellFSM.price)
     await message.answer(PRICE_ASK)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Almashish talabi (barter)
+# ---------------------------------------------------------------------------
+@router.message(SellFSM.trade_wanted, F.text)
+async def sell_trade_wanted(message: Message, state: FSMContext) -> None:
+    """Barter rejimida qanday akkaunt kerakligini qabul qiladi."""
+    if menu_button_guard(message):
+        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
+        return
+
+    wanted = (message.text or "").strip()
+    if len(wanted) < 3:
+        await message.answer(
+            "❌ Iltimos, talabni batafsilroq yozing.\n\n"
+            "Masalan: <i>Ling Collector yoki KOF boʻlsa alishaman</i>"
+        )
+        return
+
+    await state.update_data(trade_wanted=wanted[:200], price_numeric=None, price_display="")
+    await state.set_state(SellFSM.is_vip)
+    await message.answer(VIP_ASK, reply_markup=vip_kb("vip"))
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +403,17 @@ async def sell_finish(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         return
 
+    mode = "trade" if data.get("listing_mode") == "trade" else "sell"
+
     listing_id = await db.create_listing(
         user_id=user.id,
         listing_type="sell",
+        listing_mode=mode,
+        trade_wanted=str(data.get("trade_wanted") or "") or None,
         rank_info=str(data.get("rank_info") or "—"),
         skins_info=str(data.get("skins_info") or "—"),
-        price_numeric=data.get("price_numeric"),
-        price_display=str(data.get("price_display") or "Kelishilgan"),
+        price_numeric=None if mode == "trade" else data.get("price_numeric"),
+        price_display="" if mode == "trade" else str(data.get("price_display") or "Kelishilgan"),
         contact=str(data.get("contact") or "—"),
         description=str(data.get("description") or "—"),
         is_vip=int(data.get("is_vip") or 0),
@@ -368,27 +434,38 @@ async def sell_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     await message.answer(
         "🎉 <b>Rahmat! Eʼloningiz qabul qilindi.</b>\n\n"
         f"🆔 Eʼlon raqami: <b>#{listing_id}</b>\n"
-        "⏳ Holat: moderator tekshiruvi kutilmoqda.\n\n"
+        + (
+            "🔄 Rejim: almashish (barter)\n"
+            if mode == "trade"
+            else "💰 Rejim: sotish\n"
+        )
+        + "⏳ Holat: moderator tekshiruvi kutilmoqda.\n\n"
         "Tekshiruvdan soʻng eʼloningiz kanalga chiqadi va sizga xabar beramiz.\n"
         "«📋 Mening eʼlonlarim» boʻlimida holatini kuzatib borishingiz mumkin.",
         reply_markup=main_menu_kb(),
     )
 
     seller = user_label(user.id, user.username, user.full_name)
-    try:
-        await send_listing_card(
-            bot,
-            config.ADMIN_ID,
-            listing,
-            markup=moderation_kb(listing_id),
-            header="🆕 <b>Yangi eʼlon (moderatsiya)</b>",
-            seller_label=seller,
-        )
-    except TelegramAPIError as exc:
-        logger.error("Yangi eʼlon adminga yuborilmadi: %s", exc)
+    header = f"🆕 <b>Yangi eʼlon (moderatsiya)</b>\n{default_header(listing)}"
+    last_error: Optional[str] = None
+    for admin_id in db.get_admin_ids():
+        try:
+            await send_listing_card(
+                bot,
+                admin_id,
+                listing,
+                markup=moderation_kb(listing_id),
+                header=header,
+                seller_label=seller,
+            )
+        except TelegramAPIError as exc:
+            last_error = str(exc)
+            logger.error("Yangi eʼlon adminga (%s) yuborilmadi: %s", admin_id, exc)
+
+    if last_error:
         await notify_admin(
             bot,
-            f"⚠️ #{listing_id} eʼlonini yuborishda xatolik: {esc(exc)}",
+            f"⚠️ #{listing_id} eʼlonini yuborishda xatolik: {esc(last_error)}",
             markup=moderation_kb(listing_id),
         )
 

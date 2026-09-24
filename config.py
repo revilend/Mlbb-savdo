@@ -90,6 +90,17 @@ GARANT_URL: str = f"https://t.me/{GARANT_USERNAME}"
 # --- Baza --------------------------------------------------------------------
 DB_PATH: str = _env_str("DB_PATH", "market_database.sqlite3") or "market_database.sqlite3"
 
+# --- Bot identifikatori ------------------------------------------------------
+# Ishga tushganda `bot.get_me()` orqali avtomatik aniqlanadi;
+# bu qiymat faqat zaxira sifatida ishlatiladi (masalan, testlarda).
+BOT_USERNAME: str = _env_str("BOT_USERNAME").lstrip("@")
+
+# --- Kunlik hisobot ---------------------------------------------------------
+# Hisobot mahalliy vaqt bilan yuboriladi; Oʻzbekiston = UTC+5.
+TZ_OFFSET_HOURS: int = max(-12, min(14, _env_int("TZ_OFFSET_HOURS", 5)))
+DIGEST_HOUR: int = min(23, max(0, _env_int("DIGEST_HOUR", 23)))
+DIGEST_MINUTE: int = min(59, max(0, _env_int("DIGEST_MINUTE", 59)))
+
 # --- Biznes qoidalari --------------------------------------------------------
 MAX_PHOTOS: int = 10
 MAX_DESCRIPTION_LENGTH: int = 300

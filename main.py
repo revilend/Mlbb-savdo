@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher
@@ -32,6 +33,7 @@ from handlers import (
     search,
     sell,
 )
+from keyboards import set_bot_username
 from middlewares import (
     SelfDestructMiddleware,
     UserMessageCleanerMiddleware,
@@ -104,7 +106,9 @@ def setup_protection_middlewares(
         logger.info("Self-destruct oʻchirilgan.")
 
     # --- 2. Anti-flood — eng tashqi qatlam, routerlardan oldin ishlaydi ------
-    anti_flood = build_anti_flood()
+    # `db.admin_ids` jonli havola sifatida beriladi: panel orqali qo'shilgan
+    # adminlar ham darhol cheklovdan ozod bo'ladi.
+    anti_flood = build_anti_flood(db.admin_ids)
     if anti_flood is not None:
         # Bitta nusxa ikkala observer uchun ishlatiladi — hisob umumiy bo'lishi uchun
         dispatcher.message.outer_middleware(anti_flood)
@@ -142,6 +146,76 @@ async def set_bot_commands(bot: Bot) -> None:
         logger.warning("Buyruqlarni oʻrnatib boʻlmadi: %s", exc)
 
 
+def seconds_until_digest(now: Optional[datetime] = None) -> float:
+    """Keyingi kunlik hisobotgacha qolgan sekundlar soni.
+
+    Hisobot mahalliy vaqt (`config.TZ_OFFSET_HOURS`) bo'yicha
+    `DIGEST_HOUR:DIGEST_MINUTE` da yuboriladi (sukut: 23:59).
+    """
+    tz = timezone(timedelta(hours=config.TZ_OFFSET_HOURS))
+    current = (now or datetime.now(timezone.utc)).astimezone(tz)
+    target = current.replace(
+        hour=config.DIGEST_HOUR,
+        minute=config.DIGEST_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if target <= current:
+        target += timedelta(days=1)
+    return max(1.0, (target - current).total_seconds())
+
+
+async def send_daily_digest(bot: Bot) -> None:
+    """Kunlik hisobotni barcha adminlarga yuboradi."""
+    new_users, new_listings, sold_listings = await db.get_today_stats()
+    text = (
+        "📊 <b>KUNLIK HISOBOT:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Bugungi yangi a'zolar: <b>+{new_users}</b>\n"
+        f"📝 Yangi eʼlonlar: <b>{new_listings}</b>\n"
+        f"✅ Sotilgan akkauntlar: <b>{sold_listings}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Tizim 24/7 rejimida faol."
+    )
+
+    for admin_id in db.get_admin_ids():
+        try:
+            await bot.send_message(admin_id, text, disable_web_page_preview=True)
+        except TelegramAPIError as exc:
+            logger.warning("Kunlik hisobot yuborilmadi (admin=%s): %s", admin_id, exc)
+
+
+def start_daily_digest(bot: Bot) -> asyncio.Task:
+    """Kunlik hisobot vazifasini fonda ishga tushiradi."""
+    return asyncio.create_task(daily_digest_task(bot), name="daily_digest")
+
+
+async def daily_digest_task(bot: Bot) -> None:
+    """Har kuni belgilangan vaqtda adminlarga hisobot yuboradigan fon sikli."""
+    while True:
+        delay = seconds_until_digest()
+        logger.info(
+            "Kunlik hisobot %02d:%02d da yuboriladi (%.0f sekunddan keyin).",
+            config.DIGEST_HOUR,
+            config.DIGEST_MINUTE,
+            delay,
+        )
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+
+        try:
+            await send_daily_digest(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # hisobot yiqilsa ham sikl davom etadi
+            logger.error("Kunlik hisobotni yuborishda xatolik: %s", exc)
+
+        # Kun chegarasidan o'tib ketmaslik uchun qisqa pauza
+        await asyncio.sleep(60)
+
+
 async def main() -> None:
     """Botni ishga tushiradi."""
     logging.basicConfig(
@@ -169,6 +243,7 @@ async def main() -> None:
 
     try:
         me = await bot.get_me()
+        set_bot_username(me.username)
         logger.info("Bot ishga tushdi: @%s (ID: %s)", me.username, me.id)
     except TelegramAPIError as exc:
         logger.error("Bot tokenini tekshirib boʻlmadi: %s", exc)
@@ -179,6 +254,8 @@ async def main() -> None:
 
     await set_bot_commands(bot)
 
+    digest_task = start_daily_digest(bot)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Polling boshlandi. Toʻxtatish uchun Ctrl+C bosing.")
@@ -187,6 +264,13 @@ async def main() -> None:
             allowed_updates=dispatcher.resolve_used_update_types(),
         )
     finally:
+        digest_task.cancel()
+        try:
+            await digest_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # tozalashda hech qanday xatolik ko'tarilmasin
+            logger.debug("Kunlik hisobot vazifasi toʻxtatildi: %s", exc)
         await self_destruct.shutdown()
         if user_cleaner is not None:
             await user_cleaner.shutdown()

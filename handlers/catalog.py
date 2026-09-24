@@ -13,8 +13,10 @@ from aiogram.types import CallbackQuery, Message
 
 from database import db
 from handlers.common import (
+    default_header,
     esc,
     format_price,
+    is_trade,
     notify_admin,
     send_listing_card,
     seller_label_of,
@@ -87,7 +89,7 @@ async def random_listing(message: Message, bot: Bot) -> None:
         message.chat.id,
         listing,
         markup=listing_action_kb(listing),
-        header="🎲 <b>Tasodifiy akkaunt</b>",
+        header=f"🎲 <b>Tasodifiy akkaunt</b>\n{default_header(listing)}",
         seller_label=await seller_label_of(listing),
     )
 
@@ -147,13 +149,29 @@ async def deal_cb(callback: CallbackQuery, bot: Bot) -> None:
 
     seller = await db.get_user(int(listing["user_id"]))
     is_buy = listing.get("listing_type") == "buy"
+    trade = is_trade(listing)
+
+    if is_buy:
+        kind_line = "🛒 Xaridor soʻrovi"
+    elif trade:
+        kind_line = "🔄 Almashish (barter) eʼloni"
+    else:
+        kind_line = "💰 Sotuvchi eʼloni"
+
+    if trade:
+        demand_line = f"🎯 Talab: {esc(listing.get('trade_wanted') or 'Kelishiladi')}"
+    else:
+        demand_line = (
+            "💵 Narx: "
+            + esc(listing.get("price_display") or format_price(listing.get("price_numeric")))
+        )
 
     admin_text = (
         "🛡️ <b>Admin orqali bitim soʻrovi!</b>\n\n"
         f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
-        f"📌 Turi: {'🛒 Xaridor soʻrovi' if is_buy else '💰 Sotuvchi eʼloni'}\n"
+        f"📌 Turi: {kind_line}\n"
         f"🏆 Rank: {esc(listing.get('rank_info') or '—')}\n"
-        f"💵 Narx: {esc(listing.get('price_display') or format_price(listing.get('price_numeric')))}\n\n"
+        f"{demand_line}\n\n"
         f"🙋 Kim murojaat qildi: {user_link(user.id, user.full_name)}"
         + (f" ({esc(user.username)})" if user.username else "")
         + f"\n🆔 Buyurtmachi ID: <code>{user.id}</code>\n"

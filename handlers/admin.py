@@ -19,8 +19,12 @@ import config
 from database import db
 from handlers.common import (
     ADMIN_PANEL_TEXT,
+    default_header,
     esc,
     get_channel_id,
+    get_channel_link,
+    get_required_channel,
+    get_required_channel_link,
     send_listing_card,
     seller_label_of,
     status_label,
@@ -28,7 +32,9 @@ from handlers.common import (
 )
 from keyboards import (
     admin_panel_kb,
+    admins_kb,
     cancel_kb,
+    channels_kb,
     dm_user_kb,
     listing_action_kb,
     main_menu_kb,
@@ -47,6 +53,31 @@ CHANNEL_PROMPT = (
     "⚠️ Bot kanalda administrator boʻlishi shart, aks holda aʼzolikni "
     "tekshirib boʻlmaydi.\n\n"
     "Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing."
+)
+
+POST_CHANNEL_PROMPT = (
+    "📣 <b>Eʼlon kanalini sozlash</b>\n\n"
+    "Tasdiqlangan eʼlonlar shu kanalga joylanadi.\n\n"
+    "Kanal username ini (@belgisi bilan yoki belgisiz), <code>-100...</code> "
+    "ID sini yuboring yoki kanaldan istalgan xabarni <b>forward</b> qilib "
+    "yuboring.\n\n"
+    "⚠️ Bot kanalda administrator boʻlishi shart.\n\n"
+    "Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing."
+)
+
+ADMIN_ADD_PROMPT = (
+    "➕ <b>Yangi admin qoʻshish</b>\n\n"
+    "Yangi administratorning <b>Telegram ID</b> sini yoki botdagi "
+    "<b>username</b> ini yuboring.\n\n"
+    "Masalan: <code>123456789</code> yoki <code>@username</code>\n\n"
+    "⚠️ U botga kamida bir marta /start bosgan boʻlishi kerak."
+)
+
+ADMIN_REMOVE_PROMPT = (
+    "➖ <b>Adminni oʻchirish</b>\n\n"
+    "Oʻchiriladigan administratorning <b>ID</b> sini yuboring.\n\n"
+    "Masalan: <code>123456789</code>\n\n"
+    "⚠️ Asosiy administratorni (.env dagi ADMIN_ID) oʻchirib boʻlmaydi."
 )
 
 LOOKUP_PROMPT = (
@@ -76,8 +107,8 @@ DM_PROMPT = "✉️ Foydalanuvchiga yuboriladigan xabarni joʻnating."
 
 
 def is_admin(user_id: Optional[int]) -> bool:
-    """Foydalanuvchi administrator ekanmi?"""
-    return bool(user_id) and user_id == config.ADMIN_ID
+    """Foydalanuvchi administrator ekanmi (bot ichida qoʻshilganlar ham)."""
+    return db.is_admin(user_id)
 
 
 async def _deny(callback: CallbackQuery) -> None:
@@ -98,11 +129,7 @@ async def approve_listing(bot: Bot, listing_id: int) -> tuple[bool, str]:
     if not channel_id:
         return False, "Kanal sozlanmagan. «⚙️ Majburiy kanal» boʻlimidan sozlang."
 
-    header = (
-        "🆕 <b>Yangi xaridor soʻrovi</b>"
-        if listing.get("listing_type") == "buy"
-        else "🔥 <b>Yangi akkaunt sotuvda</b>"
-    )
+    header = f"🆕 <b>Yangi eʼlon</b>\n{default_header(listing)}"
 
     try:
         message = await send_listing_card(
@@ -268,6 +295,35 @@ async def adm_stats(callback: CallbackQuery) -> None:
             )
 
 
+@router.callback_query(F.data == "adm_today")
+async def adm_today(callback: CallbackQuery) -> None:
+    """Bugungi qisqa hisobot (kunlik digest bilan bir xil maʼlumot)."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    new_users, new_listings, sold_listings = await db.get_today_stats()
+    text = (
+        "📊 <b>KUNLIK HISOBOT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Bugungi yangi a'zolar: <b>+{new_users}</b>\n"
+        f"📝 Yangi eʼlonlar: <b>{new_listings}</b>\n"
+        f"✅ Sotilgan akkauntlar: <b>{sold_listings}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=single_button_kb("⬅️ Orqaga", "adm_back")
+            )
+        except TelegramAPIError:
+            await callback.message.answer(
+                text, reply_markup=single_button_kb("⬅️ Orqaga", "adm_back")
+            )
+
+
 @router.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     """Tarqatish jarayonini boshlaydi."""
@@ -283,19 +339,125 @@ async def adm_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "adm_sub_channel")
 async def adm_sub_channel(callback: CallbackQuery, state: FSMContext) -> None:
-    """Majburiy kanalni sozlashni boshlaydi."""
+    """Kanallar bo'limini ochadi (e'lon kanali + majburiy kanal)."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    post = await get_channel_id()
+    required = await get_required_channel()
+    text = (
+        "📡 <b>Kanallar boshqaruvi</b>\n\n"
+        "Barcha kanallar bot ichidan sozlanadi.\n\n"
+        f"📣 Eʼlon kanali: <code>{esc(post or 'sozlanmagan')}</code>\n"
+        f"🔒 Majburiy kanal: <code>{esc(required or 'sozlanmagan')}</code>"
+    )
+
+    await state.clear()
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        markup = channels_kb(post_set=bool(post), required_set=bool(required))
+        try:
+            await callback.message.edit_text(text, reply_markup=markup)
+        except TelegramAPIError:
+            await callback.message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "adm_post_channel")
+async def adm_post_channel(callback: CallbackQuery, state: FSMContext) -> None:
+    """E'lon kanalini sozlashni boshlaydi."""
     if not is_admin(callback.from_user.id):
         await _deny(callback)
         return
 
     current = await get_channel_id()
+    await state.clear()
     await state.set_state(AdminFSM.set_channel_input)
+    await state.update_data(channel_kind="post")
     await callback.answer()
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            f"📣 Hozirgi kanal: <code>{esc(current or 'sozlanmagan')}</code>\n\n{CHANNEL_PROMPT}",
+            f"📣 Hozirgi eʼlon kanali: <code>{esc(current or 'sozlanmagan')}</code>\n\n"
+            f"{POST_CHANNEL_PROMPT}",
             reply_markup=cancel_kb(),
         )
+
+
+@router.callback_query(F.data == "adm_sub_required")
+async def adm_required_channel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Majburiy kanalni sozlashni boshlaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    current = await get_required_channel()
+    await state.clear()
+    await state.set_state(AdminFSM.set_channel_input)
+    await state.update_data(channel_kind="required")
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"🔒 Hozirgi majburiy kanal: <code>{esc(current or 'sozlanmagan')}</code>\n\n"
+            f"{CHANNEL_PROMPT}",
+            reply_markup=cancel_kb(),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Adminlarni boshqarish
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "adm_admins")
+async def adm_admins(callback: CallbackQuery, state: FSMContext) -> None:
+    """Adminlar ro'yxatini ko'rsatadi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await state.clear()
+    ids = db.get_admin_ids()
+    lines = ["👥 <b>Administratorlar</b>\n"]
+    for index, admin_id in enumerate(ids, start=1):
+        user = await db.get_user(admin_id)
+        label = user_label(admin_id, (user or {}).get("username"), (user or {}).get("full_name"))
+        role = " (asosiy)" if config.ADMIN_ID and admin_id == int(config.ADMIN_ID) else ""
+        lines.append(f"{index}. <code>{admin_id}</code> — {esc(label)}{role}")
+    lines.append("\n➕ Qoʻshish yoki ➖ oʻchirish uchun quyidagi tugmalardan foydalaning.")
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        text = "\n".join(lines)
+        try:
+            await callback.message.edit_text(text, reply_markup=admins_kb())
+        except TelegramAPIError:
+            await callback.message.answer(text, reply_markup=admins_kb())
+
+
+@router.callback_query(F.data == "adm_add_admin")
+async def adm_add_admin(callback: CallbackQuery, state: FSMContext) -> None:
+    """Yangi admin qo'shishni boshlaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await state.clear()
+    await state.set_state(AdminFSM.add_admin_id)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(ADMIN_ADD_PROMPT, reply_markup=cancel_kb())
+
+
+@router.callback_query(F.data == "adm_remove_admin")
+async def adm_remove_admin(callback: CallbackQuery, state: FSMContext) -> None:
+    """Adminni o'chirishni boshlaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await state.clear()
+    await state.set_state(AdminFSM.remove_admin_id)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(ADMIN_REMOVE_PROMPT, reply_markup=cancel_kb())
 
 
 @router.callback_query(F.data == "adm_lookup")
@@ -403,7 +565,7 @@ async def do_broadcast(message: Message, state: FSMContext, bot: Bot) -> None:
     failed = 0
 
     for index, user_id in enumerate(user_ids, start=1):
-        if user_id == config.ADMIN_ID:
+        if db.is_admin(user_id):
             continue
         try:
             await bot.copy_message(
@@ -437,13 +599,33 @@ async def do_broadcast(message: Message, state: FSMContext, bot: Bot) -> None:
     )
 
 
-@router.message(AdminFSM.set_channel_input, F.text)
+@router.message(AdminFSM.set_channel_input)
 async def set_channel(message: Message, state: FSMContext, bot: Bot) -> None:
-    """Majburiy kanalni o'rnatadi."""
+    """Kanalni (e'lon yoki majburiy) o'rnatadi.
+
+    Matn ko'rinishidagi username/ID yoki kanaldan forward qilingan xabar
+    qabul qilinadi.
+    """
     if not is_admin(message.from_user.id if message.from_user else None):
         return
 
+    data = await state.get_data()
+    kind = "post" if data.get("channel_kind") == "post" else "required"
+
     raw = (message.text or "").strip()
+    forwarded_chat = getattr(getattr(message, "forward_origin", None), "chat", None)
+
+    if not raw and forwarded_chat is not None:
+        raw = f"@{forwarded_chat.username}" if forwarded_chat.username else str(forwarded_chat.id)
+
+    if not raw:
+        await message.answer(
+            "❌ Kanalni aniqlab boʻlmadi.\n\n"
+            "Username/ID yuboring yoki kanaldan xabarni forward qiling.",
+            reply_markup=cancel_kb(),
+        )
+        return
+
     if raw.startswith(("https://t.me/", "http://t.me/", "t.me/")):
         raw = "@" + raw.rstrip("/").split("/")[-1]
     elif not raw.startswith("@") and not raw.lstrip("-").isdigit():
@@ -462,23 +644,140 @@ async def set_channel(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         return
 
+    # Bot kanalda administrator ekanligini tekshiramiz — aks holda
+    # aʼzolikni tekshirish ham, xabar joylash ham ishlamaydi.
+    bot_status = ""
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat.id, me.id)
+        bot_status = str(getattr(member, "status", ""))
+    except TelegramAPIError as exc:
+        logger.warning("Botning kanaldagi huquqini tekshirib boʻlmadi: %s", exc)
+
+    if bot_status and bot_status not in ("administrator", "creator"):
+        await message.answer(
+            "⛔️ <b>Bot bu kanalda administrator emas.</b>\n\n"
+            f"Kanal: <b>{esc(chat.title or raw)}</b>\n\n"
+            "Iltimos, botni kanalga administrator qilib qoʻshing va "
+            "qaytadan yuboring."
+        )
+        return
+
     channel_value = f"@{chat.username}" if chat.username else str(chat.id)
     if chat.username:
         channel_link = f"https://t.me/{chat.username}"
     else:
         channel_link = getattr(chat, "invite_link", None) or ""
 
-    await db.set_setting("required_channel", channel_value)
-    await db.set_setting("required_channel_link", channel_link or "")
+    await db.set_channel(kind, channel_value, channel_link or "")
     await state.clear()
 
+    title = "Eʼlon kanali" if kind == "post" else "Majburiy kanal"
+    emoji = "📣" if kind == "post" else "🔒"
     await message.answer(
-        "✅ <b>Majburiy kanal yangilandi!</b>\n\n"
-        f"📣 Kanal: <b>{esc(chat.title or channel_value)}</b>\n"
+        f"✅ <b>{title} yangilandi!</b>\n\n"
+        f"{emoji} Kanal: <b>{esc(chat.title or channel_value)}</b>\n"
         f"🔗 Qiymat: <code>{esc(channel_value)}</code>\n"
         f"🔗 Havola: {esc(channel_link or 'mavjud emas')}",
         reply_markup=main_menu_kb(),
     )
+
+
+@router.message(AdminFSM.add_admin_id, F.text)
+async def add_admin(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Yangi adminni qo'shadi."""
+    admin_id = message.from_user.id if message.from_user else None
+    if not is_admin(admin_id):
+        return
+
+    raw = (message.text or "").strip()
+    target: Optional[dict] = None
+
+    if raw.lstrip("-").isdigit():
+        target = await db.get_user(int(raw))
+        new_id = int(raw)
+    else:
+        target = await db.get_user_by_username(raw)
+        new_id = int(target["user_id"]) if target else 0
+
+    if not new_id or target is None:
+        await message.answer(
+            "❌ <b>Foydalanuvchi topilmadi.</b>\n\n"
+            "U botga kamida bir marta /start bosgan boʻlishi kerak.\n"
+            "Qaytadan ID yoki username yuboring.",
+            reply_markup=cancel_kb(),
+        )
+        return
+
+    if new_id == admin_id:
+        await message.answer("ℹ️ Siz allaqachon administratorsiz.")
+        return
+
+    created = await db.add_admin(new_id)
+    await state.clear()
+
+    label = user_label(new_id, target.get("username"), target.get("full_name"))
+    if created:
+        await message.answer(
+            "✅ <b>Yangi admin qoʻshildi!</b>\n\n"
+            f"👤 {esc(label)}\n"
+            f"🆔 <code>{new_id}</code>",
+            reply_markup=main_menu_kb(),
+        )
+        try:
+            await bot.send_message(
+                new_id,
+                "🎉 <b>Tabriklaymiz!</b>\n\n"
+                "Siz botda administrator etib tayinlandingiz.\n"
+                "Panelni ochish uchun <code>/admin</code> buyrugʻini yuboring.",
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Yangi adminga xabar yuborilmadi: %s", exc)
+    else:
+        await message.answer(
+            f"ℹ️ <code>{new_id}</code> allaqachon administrator.",
+            reply_markup=main_menu_kb(),
+        )
+
+
+@router.message(AdminFSM.remove_admin_id, F.text)
+async def remove_admin(message: Message, state: FSMContext) -> None:
+    """Adminni o'chiradi."""
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+
+    raw = (message.text or "").strip().lstrip("@")
+    target = None if raw.lstrip("-").isdigit() else await db.get_user_by_username(raw)
+    target_id = int(raw) if raw.lstrip("-").isdigit() else int((target or {}).get("user_id") or 0)
+
+    if not target_id:
+        await message.answer(
+            "❌ Foydalanuvchi topilmadi. ID raqamini yuboring.",
+            reply_markup=cancel_kb(),
+        )
+        return
+
+    if config.ADMIN_ID and target_id == int(config.ADMIN_ID):
+        await message.answer(
+            "⛔️ Asosiy administratorni oʻchirib boʻlmaydi.\n\n"
+            "U <code>.env</code> faylidagi <code>ADMIN_ID</code> orqali belgilangan.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    removed = await db.remove_admin(target_id)
+    await state.clear()
+
+    if removed:
+        await message.answer(
+            f"✅ <code>{target_id}</code> adminlar roʻyxatidan oʻchirildi.",
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await message.answer(
+            f"ℹ️ <code>{target_id}</code> adminlar roʻyxatida yoʻq.",
+            reply_markup=main_menu_kb(),
+        )
 
 
 @router.message(AdminFSM.lookup_user_id, F.text)

@@ -17,8 +17,13 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 | 📋 Mening e'lonlarim | Holatni ko'rish, «Sotildi» belgilash, 24 soatda bir marta UP |
 | 🛡️ Garant xizmati | Xavfsiz bitim jarayoni va Moonton akkauntni o'tkazish ro'yxati |
 | 📊 Statistika | Foydalanuvchilar, aktiv e'lonlar, sotilgan akkauntlar |
+| 🔄 Almashish (Barter) | Sotish anketasida rejim tanlash — narx o'rniga «🎯 Talab» ko'rsatiladi |
+| 📉 Narxni tushirish | Kanaldagi e'lon avtomatik yangilanadi, sevimlilarga darhol push xabar boradi |
+| ↗️ Ulashish | Har bir e'londa «Do'stlarga ulashish» tugmasi (`?start=view_{id}`) |
+| ❓ Qoʻllanma | Xavfsiz sotib olish, garant qoidalari va e'lon berish bo'yicha qo'llanma |
+| 🕗 Kunlik hisobot | Har kuni 23:59 da adminlarga yangi a'zolar/e'lonlar/sotuvlar hisoboti |
 | 🧹 Chatni tozalash | `/clean` — chatdagi barcha bot xabarlarini bir zumda o'chiradi |
-| 🛠️ Admin panel | Moderatsiya, tarqatish, kanal sozlamasi, foydalanuvchi qidirish, qora ro'yxat |
+| 🛠️ Admin panel | Moderatsiya, tarqatish, adminlarni qoʻshish/oʻchirish, kanallar boshqaruvi, foydalanuvchi qidirish, qora ro'yxat |
 | 🐢 Anti-flood | Har bir foydalanuvchi uchun so'rovlar chegarasi + bosqichli mute |
 | ⏱ Self-destruct | Bot xabarlari belgilangan vaqtdan keyin o'z-o'zidan o'chadi |
 
@@ -38,7 +43,8 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 ├── tests/
 │   ├── conftest.py        # fixture'lar, soxta Telegram obyektlari, boshqariladigan vaqt
 │   ├── test_anti_flood.py # anti-flood middleware testlari
-│   └── test_self_destruct.py # TTL / reyestr / tozalagich testlari
+│   ├── test_self_destruct.py # TTL / reyestr / tozalagich testlari
+│   └── test_features.py   # barter, narx tushirish, ulashish, kunlik hisobot, admin panel
 ├── middlewares/
 │   ├── anti_flood.py      # spamga qarshi cheklov (sliding window + mute)
 │   └── self_destruct.py   # o'z-o'zini o'chiruvchi xabarlar + /clean reyestri
@@ -81,8 +87,9 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
    GARANT_USERNAME=my_garant      # garant akkunti (@ belgisisiz)
    ```
 
-   Anti-flood va xabarlarni tozalash sozlamalari ham `env.example` faylida
-   izohlari bilan keltirilgan (`FLOOD_*`, `SELF_DESTRUCT_*`).
+   Anti-flood, xabarlarni tozalash va kunlik hisobot sozlamalari ham
+   `env.example` faylida izohlari bilan keltirilgan (`FLOOD_*`,
+   `SELF_DESTRUCT_*`, `DIGEST_*`).
 
 5. Botni kanalga **administrator** qilib qo'shing (a'zolikni tekshirishi va
    e'lon joylashi uchun shart).
@@ -104,6 +111,10 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
    bog'lanadi.
 6. Sotuvchi «✅ Sotildi deb belgilash» bosganda kanaldagi e'lon
    «🔴 SOTILDI» sarlavhasi bilan yangilanadi va tugmalar olib tashlanadi.
+7. «📉 Narxni tushirish» orqali eski narx ustidan chizilib, kanaldagi e'lon
+   «🔥 NARX TUSHDI» bilan yangilanadi va sevimlilarga push xabar ketadi.
+8. Har kuni 23:59 da barcha adminlarga kunlik hisobot (yangi a'zolar,
+   e'lonlar, sotuvlar) yuboriladi.
 
 ## 🐢 Anti-flood (spam himoyasi)
 
@@ -182,14 +193,15 @@ pytest tests/test_anti_flood.py -v
 pytest -k "mute or window"
 ```
 
-Suite **68 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
+Suite **107 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
 (Telegram API soxtalashtiriladi, vaqt `Clock` fixture'i bilan boshqariladi,
 shuning uchun testlar tez va deterministik).
 
 | Fayl | Testlar | Qamrov |
 | --- | --- | --- |
-| `test_anti_flood.py` | 28 | sürgülü oyna, ogohlantirish throttling, mute va uning tugashi, purge, jimgina rejim, callback kafolati, bypass, GC, `build_anti_flood()` |
+| `test_anti_flood.py` | 30 | sürgülü oyna, ogohlantirish throttling, mute va uning tugashi, purge, jimgina rejim, callback kafolati, bypass, GC, `build_anti_flood()` |
 | `test_self_destruct.py` | 40 | `temporary`/`permanent`, `MessageRegistry`, rejalashtirish qoidalari (kanal/guruh himoyasi), haqiqiy o'chirish, `shutdown()`, session zanjiri integratsiyasi, `sweep_chat()`, foydalanuvchi tozalagichi |
+| `test_features.py` | 37 | barter/rejim anketasi, narx tushirish (kanal + sevimlilar), ulashish tugmasi, qo'llanma, kunlik hisobot, admin va kanal boshqaruvi, yangi DB ustunlari |
 
 **Regressiya himoyasi:** `test_default_settings_are_gentle` sukut qiymatlar
 yumshoq rejimda qolishini kafolatlaydi — kimdir chegaralarni qattiqlashtirsa,

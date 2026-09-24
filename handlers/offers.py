@@ -18,6 +18,7 @@ from database import db
 from handlers.common import (
     esc,
     format_price,
+    is_trade,
     menu_button_guard,
     notify_admin,
     parse_price,
@@ -58,16 +59,27 @@ async def offer_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(offer_listing_id=listing_id)
 
     if isinstance(callback.message, Message):
-        await callback.message.answer(
-            "💬 <b>Narx taklif qilish</b>\n\n"
-            f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
-            f"💵 Eʼlon narxi: <b>{esc(listing.get('price_display') or format_price(listing.get('price_numeric')))}</b>\n\n"
-            "Qancha narx taklif qilasiz? Summani raqamda yozing "
-            "(masalan: <code>1200000</code>).",
-            reply_markup=cancel_kb(),
-        )
+        if is_trade(listing):
+            await callback.message.answer(
+                "🔄 <b>Almashish taklifi</b>\n\n"
+                f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
+                f"🎯 Egasi talabi: <b>{esc(listing.get('trade_wanted') or 'Kelishiladi')}</b>\n\n"
+                "Qanday akkauntni almashtirishga taklif qilasiz? "
+                "Qisqacha yozib yuboring.\n\n"
+                "Masalan: <i>Mythic Glory, 90kof, 3 legend</i>",
+                reply_markup=cancel_kb(),
+            )
+        else:
+            await callback.message.answer(
+                "💬 <b>Narx taklif qilish</b>\n\n"
+                f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
+                f"💵 Eʼlon narxi: <b>{esc(listing.get('price_display') or format_price(listing.get('price_numeric')))}</b>\n\n"
+                "Qancha narx taklif qilasiz? Summani raqamda yozing "
+                "(masalan: <code>1200000</code>).",
+                reply_markup=cancel_kb(),
+            )
 
-    await callback.answer("✍️ Taklif summasini kiriting.")
+    await callback.answer("✍️ Taklifingizni kiriting.")
 
 
 @router.message(OfferFSM.waiting_amount, F.text)
@@ -88,20 +100,48 @@ async def offer_amount(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
         return
 
-    amount = parse_price(message.text)
-    if amount is None or amount < config.MIN_PRICE:
+    data = await state.get_data()
+    listing_id = int(data.get("offer_listing_id") or 0)
+    listing = await db.get_listing(listing_id) if listing_id else None
+
+    if listing is None:
+        await state.clear()
         await message.answer(
-            "❌ Summani tushunmadim. Iltimos, faqat raqam bilan yozing.\n\n"
-            "Masalan: <code>1200000</code>"
+            "⚠️ Eʼlon topilmadi. Taklif yuborilmadi.",
+            reply_markup=main_menu_kb(),
         )
         return
 
-    data = await state.get_data()
-    listing_id = int(data.get("offer_listing_id") or 0)
-    listing = await db.get_listing(listing_id)
+    trade = is_trade(listing)
+    offer_line = ""
+    offer_text = ""
+    summary = ""
+
+    if trade:
+        offered = (message.text or "").strip()
+        if len(offered) < 3:
+            await message.answer(
+                "❌ Taklifni batafsilroq yozing.\n\n"
+                "Masalan: <i>Mythic Glory, 90kof, 3 legend</i>"
+            )
+            return
+        offered = offered[:300]
+        offer_line = f"🔄 Taklif: {esc(offered)}"
+        summary = offered
+    else:
+        amount = parse_price(message.text)
+        if amount is None or amount < config.MIN_PRICE:
+            await message.answer(
+                "❌ Summani tushunmadim. Iltimos, faqat raqam bilan yozing.\n\n"
+                "Masalan: <code>1200000</code>"
+            )
+            return
+        offer_line = f"💵 Taklif summasi: {esc(format_price(amount))}"
+        summary = format_price(amount)
+
     await state.clear()
 
-    if listing is None or listing.get("status") != "active":
+    if listing.get("status") != "active":
         await message.answer(
             "⚠️ Bu eʼlon endi aktiv emas. Taklif yuborilmadi.",
             reply_markup=main_menu_kb(),
@@ -113,12 +153,21 @@ async def offer_amount(message: Message, state: FSMContext, bot: Bot) -> None:
     seller_name = user_label(seller_id, (seller or {}).get("username"), (seller or {}).get("full_name"))
 
     buyer_ref = f"@{user.username}" if user.username else f"ID: {user.id}"
-    offer_text = (
-        "🔔 <b>Yangi narx taklifi!</b>\n\n"
-        f"🆔 Sizning <b>#{listing_id}</b> eʼloningizga xaridor "
-        f"<b>{esc(format_price(amount))}</b> taklif qilmoqda!\n\n"
-        f"Qabul qilsangiz bogʻlaning: {esc(buyer_ref)}"
-    )
+    if trade:
+        offer_text = (
+            "🔄 <b>Yangi almashish taklifi!</b>\n\n"
+            f"🆔 Sizning <b>#{listing_id}</b> eʼloningizga xaridor quyidagi "
+            "akkauntni almashtirishni taklif qilmoqda:\n\n"
+            f"🎯 <b>{esc(summary)}</b>\n\n"
+            f"Qabul qilsangiz bogʻlaning: {esc(buyer_ref)}"
+        )
+    else:
+        offer_text = (
+            "🔔 <b>Yangi narx taklifi!</b>\n\n"
+            f"🆔 Sizning <b>#{listing_id}</b> eʼloningizga xaridor "
+            f"<b>{esc(summary)}</b> taklif qilmoqda!\n\n"
+            f"Qabul qilsangiz bogʻlaning: {esc(buyer_ref)}"
+        )
 
     delivered = False
     try:
@@ -129,26 +178,27 @@ async def offer_amount(message: Message, state: FSMContext, bot: Bot) -> None:
 
     if delivered:
         await message.answer(
-            "✅ <b>Taklifingiz sotuvchiga yuborildi!</b>\n\n"
-            f"💵 Taklif: <b>{esc(format_price(amount))}</b>\n"
-            "⏳ Sotuvchi javobini kuting. Xavfsizlik uchun bitimni faqat garant orqali yakunlang.",
+            "✅ <b>Taklifingiz eʼlon egasiga yuborildi!</b>\n\n"
+            f"📨 Taklif: <b>{esc(summary)}</b>\n"
+            "⏳ Javobini kuting. Xavfsizlik uchun bitimni faqat garant orqali yakunlang.",
             reply_markup=main_menu_kb(),
         )
     else:
         await message.answer(
-            "⚠️ <b>Taklifni sotuvchiga yuborib boʻlmadi.</b>\n\n"
-            "Ehtimol sotuvchi botni bloklagan. Administratorga murojaat qiling — "
+            "⚠️ <b>Taklifni yuborib boʻlmadi.</b>\n\n"
+            "Ehtimol eʼlon egasi botni bloklagan. Administratorga murojaat qiling — "
             "u sizga yordam beradi.",
             reply_markup=main_menu_kb(),
         )
 
     await notify_admin(
         bot,
-        "💬 <b>Narx taklifi</b>\n\n"
+        ("🔄 <b>Almashish taklifi</b>" if trade else "💬 <b>Narx taklifi</b>")
+        + "\n\n"
         f"🆔 Eʼlon: #{listing_id}\n"
-        f"👤 Sotuvchi: {esc(seller_name)}\n"
+        f"👤 Egasi: {esc(seller_name)}\n"
         f"🙋 Xaridor: {esc(buyer_ref)}\n"
-        f"💵 Taklif summasi: {esc(format_price(amount))}\n"
+        f"{offer_line}\n"
         f"{'✅ Yuborildi' if delivered else '⚠️ Yuborilmadi'}"
     )
 

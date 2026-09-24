@@ -85,6 +85,7 @@ class AntiFloodMiddleware(BaseMiddleware):
         delete_flooding_messages: bool = False,
         notify: bool = True,
         bypass_user_ids: Optional[Set[int]] = None,
+        live_bypass_user_ids: Optional[Set[int]] = None,
     ) -> None:
         self.window = max(0.5, float(window))
         self.max_events = max(1, int(max_events))
@@ -97,6 +98,11 @@ class AntiFloodMiddleware(BaseMiddleware):
         # False bo'lsa hech qanday ogohlantirish yuborilmaydi ("jimgina rejim")
         self.notify_enabled = bool(notify)
         self.bypass_user_ids: Set[int] = set(bypass_user_ids or ())
+        #: Jonli havola (masalan, `db.admin_ids`): yangi admin qo'shilganda
+        #: ham qayta ishga tushirmasdan cheklovdan ozod bo'ladi.
+        self.live_bypass_user_ids: Set[int] = (
+            live_bypass_user_ids if live_bypass_user_ids is not None else set()
+        )
 
         self._states: Dict[int, _UserState] = {}
         self._calls: int = 0
@@ -109,7 +115,11 @@ class AntiFloodMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         user = self._extract_user(event, data)
-        if user is None or user.id in self.bypass_user_ids:
+        if (
+            user is None
+            or user.id in self.bypass_user_ids
+            or user.id in self.live_bypass_user_ids
+        ):
             return await handler(event, data)
 
         now = self._now()
@@ -271,8 +281,15 @@ class AntiFloodMiddleware(BaseMiddleware):
         self._states.pop(user_id, None)
 
 
-def build_anti_flood() -> Optional[AntiFloodMiddleware]:
-    """Konfiguratsiyaga asoslanib middleware yaratadi (oʻchirilgan boʻlsa `None`)."""
+def build_anti_flood(
+    live_bypass_user_ids: Optional[Set[int]] = None,
+) -> Optional[AntiFloodMiddleware]:
+    """Konfiguratsiyaga asoslanib middleware yaratadi (oʻchirilgan boʻlsa `None`).
+
+    :param live_bypass_user_ids: jonli havola sifatida saqlanadigan toʻplam
+        (odatda `db.admin_ids`) — bot ichida qoʻshilgan adminlar ham
+        cheklovdan ozod boʻlishi uchun.
+    """
     if not config.FLOOD_PROTECTION:
         return None
 
@@ -291,6 +308,7 @@ def build_anti_flood() -> Optional[AntiFloodMiddleware]:
         delete_flooding_messages=config.FLOOD_DELETE_MESSAGES,
         notify=config.FLOOD_NOTIFY,
         bypass_user_ids=bypass,
+        live_bypass_user_ids=live_bypass_user_ids if config.FLOOD_BYPASS_ADMIN else None,
     )
 
 
