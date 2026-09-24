@@ -23,19 +23,19 @@ import config
 import pytest
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import Chat, Message
-from conftest import GC_PERIOD, USER_ID, make_callback, make_message, make_user
+from conftest import GC_PERIOD, USER_ID, Clock, make_callback, make_message, make_user
 from middlewares.anti_flood import AntiFloodMiddleware, build_anti_flood
 
 
 @pytest.fixture(autouse=True)
-def _patch_telegram_shortcuts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Middleware Telegram metodlarini chaqiradi — ularni doim soxtalashtiramiz.
+def _frozen_time(clock: Clock) -> Clock:
+    """Barcha anti-flood testlari boshqariladigan vaqtda ishlaydi.
 
-    Testlar o'z mock'ini alohida fixture orqali olsa, u shu mock'ni
-    almashtiradi (pytest autouse fixture'larni birinchi yaratadi).
+    Real `time.monotonic()` ga tayanadigan test mashinaning ishlab turgan
+    vaqtiga (uptime) bog'liq bo'lib qoladi — bu esa CI'da kutilmaganda
+    yiqiladi. Bu fixture har bir testni deterministik qiladi.
     """
-    monkeypatch.setattr(Message, "answer", AsyncMock())
-    monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
+    return clock
 
 
 def make_middleware(**overrides: object) -> AntiFloodMiddleware:
@@ -113,6 +113,33 @@ async def test_warning_is_throttled(handler, event_data, message_answer):
         await middleware(handler, make_message(message_id=index), event_data)
 
     assert message_answer.await_count == 1
+
+
+async def test_first_warning_survives_a_freshly_booted_clock(
+    clock, handler, event_data, message_answer
+):
+    """Tizim hozirgina yongan bo'lsa ham birinchi ogohlantirish yuboriladi.
+
+    Regressiya: `last_notice` `0.0` dan boshlanganda, `time.monotonic()`
+    qiymati `notice_cooldown` dan kichik bo'lgan mashinada (uptime < 60s)
+    ogohlantirish jimgina yo'qolib qolardi — bu aynan CI'da sodir bo'lgan.
+    """
+    clock.set(0.0)
+
+    middleware = make_middleware(max_events=1, notice_cooldown=60.0, violation_limit=99)
+    await middleware(handler, make_message(message_id=1), event_data)
+    await middleware(handler, make_message(message_id=2), event_data)
+
+    assert message_answer.await_count == 1
+
+
+async def test_mute_remaining_is_zero_before_any_mute(handler, event_data):
+    """Hech qachon mute bo'lmagan foydalanuvchi uchun qoldiq 0 bo'lishi kerak."""
+    middleware = make_middleware(max_events=3)
+    await middleware(handler, make_message(message_id=1), event_data)
+
+    assert middleware.mute_remaining(USER_ID) == 0
+    assert middleware.mute_remaining(999) == 0
 
 
 async def test_warning_resent_after_cooldown(clock, handler, event_data, message_answer):

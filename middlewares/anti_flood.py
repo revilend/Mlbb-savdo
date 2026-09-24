@@ -49,15 +49,24 @@ MUTE_TEXT = (
 )
 
 
+#: "Hech qachon" sentinel'i.
+#:
+#: `0.0` ishlatilsa, `time.monotonic()` qiymati `notice_cooldown` dan kichik
+#: bo'lgan tizimda (masalan, server endigina yongan va uptime 4 sekunddan kam)
+#: birinchi ogohlantirish jimgina yo'qolib qoladi. Manfiy cheksizlik bu
+#: holatni butunlay yo'q qiladi.
+NEVER = float("-inf")
+
+
 @dataclass
 class _UserState:
     """Bitta foydalanuvchi uchun anti-flood holati."""
 
     events: Deque[float] = field(default_factory=deque)
     violations: int = 0
-    last_violation: float = 0.0
-    muted_until: float = 0.0
-    last_notice: float = 0.0
+    last_violation: float = NEVER
+    muted_until: float = NEVER
+    last_notice: float = NEVER
 
 
 class AntiFloodMiddleware(BaseMiddleware):
@@ -103,7 +112,7 @@ class AntiFloodMiddleware(BaseMiddleware):
         if user is None or user.id in self.bypass_user_ids:
             return await handler(event, data)
 
-        now = time.monotonic()
+        now = self._now()
         state = self._states.get(user.id)
         if state is None:
             state = _UserState()
@@ -123,15 +132,15 @@ class AntiFloodMiddleware(BaseMiddleware):
             return None
 
         # 2) Mute tugagan bo'lsa holatni tiklaymiz
-        if state.muted_until and state.muted_until <= now:
-            state.muted_until = 0.0
+        if state.muted_until > NEVER and state.muted_until <= now:
+            state.muted_until = NEVER
             state.violations = 0
             state.events.clear()
 
         # 3) Uzoq vaqt tinch turgan foydalanuvchining hisobini nolga tushiramiz
-        if state.last_violation and now - state.last_violation > self.mute_reset_seconds:
+        if state.last_violation > NEVER and now - state.last_violation > self.mute_reset_seconds:
             state.violations = 0
-            state.last_violation = 0.0
+            state.last_violation = NEVER
             state.events.clear()
 
         # 4) Oynadan chiqib ketgan hodisalarni olib tashlaymiz
@@ -229,7 +238,7 @@ class AntiFloodMiddleware(BaseMiddleware):
         for user_id, state in list(self._states.items()):
             idle = not state.events
             expired = (
-                not state.last_violation
+                state.last_violation <= NEVER
                 or now - state.last_violation > self.mute_reset_seconds
             )
             if idle and expired and state.muted_until <= now:
@@ -243,10 +252,16 @@ class AntiFloodMiddleware(BaseMiddleware):
     def mute_remaining(self, user_id: int) -> int:
         """Foydalanuvchi uchun qolgan mute vaqti (sekund)."""
         state = self._states.get(user_id)
-        if state is None:
+        if state is None or state.muted_until <= NEVER:
             return 0
-        remaining = state.muted_until - time.monotonic()
-        return max(0, int(remaining) + 1)
+        remaining = state.muted_until - self._now()
+        if remaining <= 0:
+            return 0
+        return int(remaining) + 1
+
+    def _now(self) -> float:
+        """Joriy monotonic vaqt (testlarda almashtiriladi)."""
+        return time.monotonic()
 
     def reset(self, user_id: Optional[int] = None) -> None:
         """Holatni tozalaydi (bitta foydalanuvchi yoki hammasi uchun)."""

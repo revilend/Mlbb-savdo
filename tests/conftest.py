@@ -51,6 +51,10 @@ class Clock:
         """Vaqtni oldinga suradi."""
         self.value += float(seconds)
 
+    def set(self, value: float) -> None:
+        """Vaqtni aniq qiymatga o'rnatadi (masalan, tizim endigina yonganda)."""
+        self.value = float(value)
+
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
@@ -133,28 +137,42 @@ def event_data() -> dict:
     return {"event_from_user": make_user(), "bot": MagicMock()}
 
 
-@pytest.fixture
-def message_answer(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """`Message.answer` ni almashtiradi va chaqiruvlarni yozib boradi."""
-    mock = AsyncMock()
-    monkeypatch.setattr(Message, "answer", mock)
-    return mock
+@pytest.fixture(autouse=True)
+def telegram(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Telegram "shortcut" metodlarini almashtiradi.
+
+    Soxta obyektlar ustidan **bitta** fixture egalik qiladi. Aks holda bir nechta
+    fixture bir xil atributni almashtirib, qaysi mock chaqiruvni olishi fixture
+    tartibiga bog'liq bo'lib qolar edi — bu esa jimgina "yashil" o'tadigan
+    yolg'on testlarni keltirib chiqaradi.
+    """
+    mocks = SimpleNamespace(
+        answer=AsyncMock(),
+        delete=AsyncMock(return_value=True),
+        callback_answer=AsyncMock(),
+    )
+    monkeypatch.setattr(Message, "answer", mocks.answer)
+    monkeypatch.setattr(Message, "delete", mocks.delete)
+    monkeypatch.setattr(CallbackQuery, "answer", mocks.callback_answer)
+    return mocks
 
 
 @pytest.fixture
-def message_delete(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """`Message.delete` ni almashtiradi."""
-    mock = AsyncMock(return_value=True)
-    monkeypatch.setattr(Message, "delete", mock)
-    return mock
+def message_answer(telegram: SimpleNamespace) -> AsyncMock:
+    """`Message.answer` mock'i (chaqiruvlarni yozib boradi)."""
+    return telegram.answer
 
 
 @pytest.fixture
-def callback_answer(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """`CallbackQuery.answer` ni almashtiradi."""
-    mock = AsyncMock()
-    monkeypatch.setattr(CallbackQuery, "answer", mock)
-    return mock
+def message_delete(telegram: SimpleNamespace) -> AsyncMock:
+    """`Message.delete` mock'i."""
+    return telegram.delete
+
+
+@pytest.fixture
+def callback_answer(telegram: SimpleNamespace) -> AsyncMock:
+    """`CallbackQuery.answer` mock'i."""
+    return telegram.callback_answer
 
 
 @pytest.fixture
