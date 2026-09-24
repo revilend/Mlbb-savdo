@@ -1,0 +1,163 @@
+"""Narx taklif qilish (OfferFSM).
+
+Foydalanuvchi e'londagi «💬 Narx taklif qilish» tugmasini bosgach,
+summani kiritadi va bot taklifni e'lon egasiga yetkazadi.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+import config
+from database import db
+from handlers.common import (
+    esc,
+    format_price,
+    menu_button_guard,
+    notify_admin,
+    parse_price,
+    user_label,
+)
+from keyboards import BTN_CANCEL, cancel_kb, main_menu_kb
+from states import OfferFSM
+
+logger = logging.getLogger(__name__)
+
+router = Router(name="offers")
+
+
+@router.callback_query(F.data.startswith("offer_"))
+async def offer_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Taklif jarayonini boshlaydi."""
+    user = callback.from_user
+    raw_id = (callback.data or "").split("_", 1)[-1]
+    if not raw_id.isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    listing_id = int(raw_id)
+    listing = await db.get_listing(listing_id)
+    if listing is None:
+        await callback.answer("❌ Eʼlon topilmadi.", show_alert=True)
+        return
+
+    if listing.get("status") != "active":
+        await callback.answer("⚠️ Bu eʼlon aktiv emas, taklif yuborib boʻlmaydi.", show_alert=True)
+        return
+
+    if int(listing["user_id"]) == user.id:
+        await callback.answer("🙂 Bu sizning eʼloningiz.", show_alert=True)
+        return
+
+    await state.set_state(OfferFSM.waiting_amount)
+    await state.update_data(offer_listing_id=listing_id)
+
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "💬 <b>Narx taklif qilish</b>\n\n"
+            f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
+            f"💵 Eʼlon narxi: <b>{esc(listing.get('price_display') or format_price(listing.get('price_numeric')))}</b>\n\n"
+            "Qancha narx taklif qilasiz? Summani raqamda yozing "
+            "(masalan: <code>1200000</code>).",
+            reply_markup=cancel_kb(),
+        )
+
+    await callback.answer("✍️ Taklif summasini kiriting.")
+
+
+@router.message(OfferFSM.waiting_amount, F.text)
+async def offer_amount(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Taklif summasini qabul qiladi va sotuvchiga yuboradi."""
+    user = message.from_user
+    if user is None:
+        return
+
+    if message.text == BTN_CANCEL:
+        # Umumiy bekor qilish handleri odatda buni ushlaydi;
+        # bu yerdagi tekshiruv faqat zaxira uchun.
+        await state.clear()
+        await message.answer("✅ Amal bekor qilindi.", reply_markup=main_menu_kb())
+        return
+
+    if menu_button_guard(message):
+        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
+        return
+
+    amount = parse_price(message.text)
+    if amount is None or amount < config.MIN_PRICE:
+        await message.answer(
+            "❌ Summani tushunmadim. Iltimos, faqat raqam bilan yozing.\n\n"
+            "Masalan: <code>1200000</code>"
+        )
+        return
+
+    data = await state.get_data()
+    listing_id = int(data.get("offer_listing_id") or 0)
+    listing = await db.get_listing(listing_id)
+    await state.clear()
+
+    if listing is None or listing.get("status") != "active":
+        await message.answer(
+            "⚠️ Bu eʼlon endi aktiv emas. Taklif yuborilmadi.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    seller_id = int(listing["user_id"])
+    seller = await db.get_user(seller_id)
+    seller_name = user_label(seller_id, (seller or {}).get("username"), (seller or {}).get("full_name"))
+
+    buyer_ref = f"@{user.username}" if user.username else f"ID: {user.id}"
+    offer_text = (
+        "🔔 <b>Yangi narx taklifi!</b>\n\n"
+        f"🆔 Sizning <b>#{listing_id}</b> eʼloningizga xaridor "
+        f"<b>{esc(format_price(amount))}</b> taklif qilmoqda!\n\n"
+        f"Qabul qilsangiz bogʻlaning: {esc(buyer_ref)}"
+    )
+
+    delivered = False
+    try:
+        await bot.send_message(seller_id, offer_text, disable_web_page_preview=True)
+        delivered = True
+    except TelegramAPIError as exc:
+        logger.warning("Taklifni sotuvchiga yuborib boʻlmadi (user=%s): %s", seller_id, exc)
+
+    if delivered:
+        await message.answer(
+            "✅ <b>Taklifingiz sotuvchiga yuborildi!</b>\n\n"
+            f"💵 Taklif: <b>{esc(format_price(amount))}</b>\n"
+            "⏳ Sotuvchi javobini kuting. Xavfsizlik uchun bitimni faqat garant orqali yakunlang.",
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await message.answer(
+            "⚠️ <b>Taklifni sotuvchiga yuborib boʻlmadi.</b>\n\n"
+            "Ehtimol sotuvchi botni bloklagan. Administratorga murojaat qiling — "
+            "u sizga yordam beradi.",
+            reply_markup=main_menu_kb(),
+        )
+
+    await notify_admin(
+        bot,
+        "💬 <b>Narx taklifi</b>\n\n"
+        f"🆔 Eʼlon: #{listing_id}\n"
+        f"👤 Sotuvchi: {esc(seller_name)}\n"
+        f"🙋 Xaridor: {esc(buyer_ref)}\n"
+        f"💵 Taklif summasi: {esc(format_price(amount))}\n"
+        f"{'✅ Yuborildi' if delivered else '⚠️ Yuborilmadi'}"
+    )
+
+
+@router.message(OfferFSM.waiting_amount)
+async def offer_fallback(message: Message) -> None:
+    """Summa o'rniga boshqa xabar kelsa."""
+    await message.answer(
+        "✍️ Iltimos, taklif summasini raqamda yozing (masalan: <code>1200000</code>) "
+        "yoki «❌ Bekor qilish» tugmasini bosing.",
+        reply_markup=cancel_kb(),
+    )
