@@ -149,6 +149,17 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+def _runtime():
+    """Runtime sozlamalar do'konini kechiktirib import qiladi.
+
+    `settings` moduli bazaga yozish uchun shu modulga murojaat qiladi, shu
+    sababli aylanma importdan qochish uchun import funksiya ichida bajariladi.
+    """
+    from settings import settings as runtime
+
+    return runtime
+
+
 def utcnow_iso() -> str:
     """Hozirgi UTC vaqtni ISO ko'rinishida qaytaradi (sekundlar aniqligida)."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -170,7 +181,10 @@ def day_bounds_iso(
     Natija `utcnow_iso()` bilan bir xil formatda bo'lgani uchun SQL'da
     satr ko'rinishida solishtirish to'g'ri ishlaydi.
     """
-    hours = config.TZ_OFFSET_HOURS if offset_hours is None else int(offset_hours)
+    if offset_hours is None:
+        hours = int(_runtime().get("TZ_OFFSET_HOURS"))
+    else:
+        hours = int(offset_hours)
     tz = timezone(timedelta(hours=hours))
     current = (now or datetime.now(timezone.utc)).astimezone(tz)
     start_local = current.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -309,6 +323,22 @@ class Database:
         )
         await self.conn.commit()
 
+    async def delete_setting(self, key: str) -> bool:
+        """Sozlamani o'chiradi (standart qiymatga qaytarish uchun)."""
+        cursor = await self.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        await self.conn.commit()
+        return bool(cursor.rowcount)
+
+    async def get_settings_by_prefix(self, prefix: str) -> dict[str, str]:
+        """Berilgan prefiks bilan boshlanadigan barcha sozlamalarni qaytaradi."""
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        async with self.conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE ? ESCAPE '\\'",
+            (escaped + "%",),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {str(row["key"]): str(row["value"] or "") for row in rows}
+
     # ------------------------------------------------------------------ admins
     #: `settings` jadvalidagi adminlar ro'yxati kaliti
     ADMIN_SETTING_KEY = "admin_ids"
@@ -388,7 +418,7 @@ class Database:
         if stored:
             return stored.strip()
         fallback = await self.get_setting("required_channel")
-        return (fallback or config.DEFAULT_CHANNEL_ID or "").strip()
+        return (fallback or _runtime().get("DEFAULT_CHANNEL_ID") or "").strip()
 
     async def get_post_channel_link(self) -> str:
         """E'lon kanali uchun havola."""
@@ -401,7 +431,7 @@ class Database:
     async def get_required_channel(self) -> str:
         """Majburiy a'zolik tekshiriladigan kanal."""
         stored = await self.get_setting("required_channel")
-        return (stored or config.DEFAULT_CHANNEL_ID or "").strip()
+        return (stored or _runtime().get("DEFAULT_CHANNEL_ID") or "").strip()
 
     async def get_required_channel_link(self) -> str:
         """Majburiy kanal uchun havola."""
@@ -555,7 +585,7 @@ class Database:
                 1 if is_vip else 0,
                 json.dumps(photos, ensure_ascii=False),
                 status,
-                days_from_now_iso(config.LISTING_TTL_DAYS),
+                days_from_now_iso(int(_runtime().get("LISTING_TTL_DAYS"))),
                 created,
             ),
         )
@@ -898,7 +928,7 @@ class Database:
 
     async def touch_listing_expiry(self, listing_id: int, days: Optional[int] = None) -> None:
         """E'lonning amal muddatini hozirdan boshlab uzaytiradi."""
-        ttl = config.LISTING_TTL_DAYS if days is None else max(1, int(days))
+        ttl = int(_runtime().get("LISTING_TTL_DAYS")) if days is None else max(1, int(days))
         await self.conn.execute(
             "UPDATE listings SET expires_at = ? WHERE id = ?",
             (days_from_now_iso(ttl), int(listing_id)),
@@ -932,7 +962,7 @@ class Database:
 
         price = base.get("price_numeric")
         if price:
-            tolerance = config.SIMILAR_PRICE_TOLERANCE
+            tolerance = float(_runtime().get("SIMILAR_PRICE_TOLERANCE"))
             low = int(int(price) * (1 - tolerance))
             high = int(int(price) * (1 + tolerance))
             query += " AND price_numeric IS NOT NULL AND price_numeric BETWEEN ? AND ?"
@@ -1296,7 +1326,8 @@ class Database:
         offset_hours: Optional[int] = None,
     ) -> list[dict]:
         """Oxirgi `days` kun uchun kunlik ko'rsatkichlar."""
-        tz = timezone(timedelta(hours=int(config.TZ_OFFSET_HOURS if offset_hours is None else offset_hours)))
+        shift = int(_runtime().get("TZ_OFFSET_HOURS")) if offset_hours is None else int(offset_hours)
+        tz = timezone(timedelta(hours=shift))
         now_local = datetime.now(timezone.utc).astimezone(tz)
         result: list[dict] = []
 

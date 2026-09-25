@@ -25,6 +25,7 @@ from handlers.common import (
     user_label,
 )
 from keyboards import BTN_SEARCH, cancel_kb, main_menu_kb, moderation_kb, search_type_kb
+from settings import settings
 from states import SearchFSM
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ async def search_budget(message: Message, state: FSMContext) -> None:
         await state.update_data(price_numeric=None, price_display="Kelishilgan")
     else:
         price = parse_price(raw)
-        if price is None or price < config.MIN_PRICE:
+        if price is None or price < int(settings.get("MIN_PRICE")):
             await message.answer(
                 "❌ Budjetni tushunmadim. Iltimos, raqamda yozing.\n\n"
                 "Masalan: <code>2000000</code> yoki <code>kelishilgan</code>"

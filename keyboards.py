@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 import config
+from settings import GROUPS, Setting, settings
 
 # ---------------------------------------------------------------------------
 # Bot username'i
@@ -102,6 +103,17 @@ RANKS: list[str] = [
 # ---------------------------------------------------------------------------
 # Yordamchi funksiyalar
 # ---------------------------------------------------------------------------
+def garant_username() -> str:
+    """Garant akkauntining username'i (bot ichidan o'zgartiriladi)."""
+    raw = str(settings.get("GARANT_USERNAME") or "").strip().lstrip("@")
+    return raw or "my_garant"
+
+
+def garant_url() -> str:
+    """Garant bilan bog'lanish havolasi."""
+    return f"https://t.me/{garant_username()}"
+
+
 def contact_url(contact: str, fallback_username: str = "") -> str:
     """Aloqa ma'lumotidan bosiladigan havola yasaydi."""
     raw = (contact or "").strip()
@@ -114,7 +126,7 @@ def contact_url(contact: str, fallback_username: str = "") -> str:
     if re.fullmatch(r"[A-Za-z0-9_]{4,32}", clean or ""):
         return f"https://t.me/{clean}"
 
-    username = (fallback_username or config.GARANT_USERNAME).lstrip("@").strip()
+    username = (fallback_username or garant_username()).lstrip("@").strip()
     return f"https://t.me/{username}"
 
 
@@ -322,9 +334,38 @@ def moderation_kb(listing_id: int) -> InlineKeyboardMarkup:
                     text="✅ Kanalga chiqarish", callback_data=f"app_{listing_id}"
                 ),
                 InlineKeyboardButton(text="❌ Rad etish", callback_data=f"rej_{listing_id}"),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 AI tekshiruvi (qoʻlda)", callback_data=f"ai_chk_{listing_id}"
+                )
+            ],
         ]
     )
+
+
+def ai_panel_kb() -> InlineKeyboardMarkup:
+    """«🤖 AI moderatsiya» boshqaruv paneli (admin panel ichida)."""
+    enabled = settings.get_bool("AI_ENABLED")
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="⛔️ AI tekshiruvni oʻchirish" if enabled else "✅ AI tekshiruvni yoqish",
+                callback_data="adm_ai_toggle",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔑 AI API kalitini kiritish", callback_data="cfg_edit|AI_API_KEY"
+            )
+        ],
+        [
+            InlineKeyboardButton(text="🔌 Ulanishni tekshirish", callback_data="cfg_ai_test"),
+            InlineKeyboardButton(text="⚙️ Barcha sozlamalar", callback_data="cfg_g|ai"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_panel_kb() -> InlineKeyboardMarkup:
@@ -348,11 +389,101 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📋 Qora roʻyxat", callback_data="adm_blacklist"),
             ],
             [
+                InlineKeyboardButton(
+                    text=(
+                        "🤖 AI: ✅ yoqilgan"
+                        if settings.get_bool("AI_ENABLED")
+                        else "🤖 AI: ⛔️ oʻchiq"
+                    ),
+                    callback_data="adm_ai",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="⚙️ Sozlamalar", callback_data="cfg_home"),
+                InlineKeyboardButton(text="🤖 AI sozlamalari", callback_data="cfg_g|ai"),
+            ],
+            [
                 InlineKeyboardButton(text="📈 Analitika", callback_data="adm_analytics"),
                 InlineKeyboardButton(text="💾 Zaxira nusxa", callback_data="adm_backup"),
             ],
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Sozlamalar paneli
+# ---------------------------------------------------------------------------
+def _truncate(text: str, limit: int = 58) -> str:
+    """Tugma matnini Telegram chegarasiga sig'diradi."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def settings_groups_kb() -> InlineKeyboardMarkup:
+    """Sozlama guruhlari ro'yxati."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for group, label in GROUPS.items():
+        count = len(settings.group_items(group))
+        rows.append(
+            [InlineKeyboardButton(text=f"{label} ({count})", callback_data=f"cfg_g|{group}")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="🔌 AI ulanishni tekshirish", callback_data="cfg_ai_test")]
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def settings_items_kb(group: str) -> InlineKeyboardMarkup:
+    """Guruhdagi sozlamalar ro'yxati (joriy qiymatlar bilan)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in settings.group_items(group):
+        mark = "✏️" if settings.is_overridden(item.key) else "•"
+        text = _truncate(f"{mark} {item.label}: {settings.display(item.key)}")
+        rows.append([InlineKeyboardButton(text=text, callback_data=f"cfg_s|{item.key}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Guruhni standartga qaytarish", callback_data=f"cfg_resetg|{group}"
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="cfg_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def setting_detail_kb(spec: Setting, group: str) -> InlineKeyboardMarkup:
+    """Bitta sozlama uchun amallar klaviaturasi."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if spec.kind == "bool":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Almashtirish (yoqish/oʻchirish)",
+                    callback_data=f"cfg_toggle|{spec.key}",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Oʻzgartirish", callback_data=f"cfg_edit|{spec.key}"
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Standart qiymat", callback_data=f"cfg_reset|{spec.key}"
+            )
+        ]
+    )
+    if spec.key == "AI_API_KEY":
+        rows.append(
+            [InlineKeyboardButton(text="🔌 Kalitni tekshirish", callback_data="cfg_ai_test")]
+        )
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"cfg_g|{group}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admins_kb() -> InlineKeyboardMarkup:
@@ -455,8 +586,8 @@ def garant_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"🛡️ Garant: @{config.GARANT_USERNAME}",
-                    url=config.GARANT_URL,
+                    text=f"🛡️ Garant: @{garant_username()}",
+                    url=garant_url(),
                 )
             ]
         ]
@@ -469,22 +600,26 @@ def guide_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"🛡️ Garant bilan bogʻlanish: @{config.GARANT_USERNAME}",
-                    url=config.GARANT_URL,
+                    text=f"🛡️ Garant bilan bogʻlanish: @{garant_username()}",
+                    url=garant_url(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="➕ Kanaldagi eʼlonlarni koʻrish",
-                    url=(
-                        f"https://t.me/{config.DEFAULT_CHANNEL_ID.lstrip('@')}"
-                        if config.DEFAULT_CHANNEL_ID.startswith("@")
-                        else config.GARANT_URL
-                    ),
+                    url=_channel_link(),
                 )
             ],
         ]
     )
+
+
+def _channel_link() -> str:
+    """Asosiy kanal havolasi (bot ichidan sozlanadi)."""
+    channel = str(settings.get("DEFAULT_CHANNEL_ID") or "").strip()
+    if channel.startswith("@"):
+        return f"https://t.me/{channel.lstrip('@')}"
+    return garant_url()
 
 
 def deal_admin_kb(buyer_id: int, seller_id: int, username_buyer: Optional[str] = None,

@@ -22,6 +22,7 @@ import config
 from database import db, parse_dt
 from middlewares import messages as message_registry
 from middlewares import permanent, sweep_chat, temporary
+from settings import settings
 from keyboards import (
     BTN_CANCEL,
     BTN_GUIDE,
@@ -230,9 +231,7 @@ def format_expiry(listing: dict[str, Any]) -> str:
     expires = parse_dt(listing.get("expires_at"))
     if expires is None:
         return ""
-    local = expires.astimezone(
-        _tz_offset(config.TZ_OFFSET_HOURS)
-    )
+    local = expires.astimezone(_tz_offset(int(settings.get("TZ_OFFSET_HOURS"))))
     return local.strftime("%d.%m.%Y")
 
 
@@ -484,7 +483,7 @@ async def send_listing_card(
             disable_web_page_preview=True,
         )
 
-    photos = photos[: config.MAX_PHOTOS]
+    photos = photos[: int(settings.get("MAX_PHOTOS"))]
     caption = caption[:PHOTO_CAPTION_LIMIT]
 
     if len(photos) == 1:
@@ -585,7 +584,7 @@ def is_bump_available(listing: dict[str, Any]) -> tuple[bool, str]:
         return True, ""
 
     now = datetime.now(timezone.utc)
-    cooldown = timedelta(hours=config.BUMP_COOLDOWN_HOURS)
+    cooldown = timedelta(hours=int(settings.get("BUMP_COOLDOWN_HOURS")))
     elapsed = now - last
     if elapsed >= cooldown:
         return True, ""
@@ -669,14 +668,15 @@ async def handle_referral_start(message: Message, bot: Bot, is_new: bool) -> Non
     if not await db.set_referrer(user.id, referrer_id):
         return
 
-    if config.REFERRAL_REWARD_VIP > 0 and is_new:
-        await db.add_free_vip(referrer_id, config.REFERRAL_REWARD_VIP)
+    reward = int(settings.get("REFERRAL_REWARD_VIP"))
+    if reward > 0 and is_new:
+        await db.add_free_vip(referrer_id, reward)
 
     total = await db.count_referrals(referrer_id)
     nickname = esc(user.full_name or user.first_name or "Yangi doʻst")
     reward_line = (
-        f"\n🎁 Sizga <b>{config.REFERRAL_REWARD_VIP}</b> ta bepul VIP eʼlon qoʻshildi!"
-        if config.REFERRAL_REWARD_VIP > 0 and is_new
+        f"\n🎁 Sizga <b>{reward}</b> ta bepul VIP eʼlon qoʻshildi!"
+        if reward > 0 and is_new
         else ""
     )
     try:
@@ -859,7 +859,7 @@ async def show_referral(message: Message) -> None:
         f"🔗 Sizning havolangiz:\n<code>{esc(link)}</code>\n\n"
         f"👥 Siz taklif qilgan doʻstlar: <b>{count}</b>\n"
         f"💎 Bepul VIP eʼlonlar: <b>{credits}</b>\n"
-        f"🎯 Har bir yangi doʻst uchun: <b>+{config.REFERRAL_REWARD_VIP} VIP</b>\n\n"
+        f"🎯 Har bir yangi doʻst uchun: <b>+{settings.get('REFERRAL_REWARD_VIP')} VIP</b>\n\n"
         "ℹ️ VIP eʼlon roʻyxatda yuqorida turadi. Kredit keyingi eʼlon "
         "joylashtirishda avtomatik taklif qilinadi."
     )

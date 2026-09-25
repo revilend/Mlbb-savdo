@@ -26,6 +26,7 @@ from handlers.common import (
     user_label,
 )
 from keyboards import BTN_CANCEL, cancel_kb, main_menu_kb, offer_response_kb
+from settings import settings
 from states import OfferFSM
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ async def offer_amount(message: Message, state: FSMContext, bot: Bot) -> None:
         summary = offered
     else:
         amount = parse_price(message.text)
-        if amount is None or amount < config.MIN_PRICE:
+        if amount is None or amount < int(settings.get("MIN_PRICE")):
             await message.answer(
                 "❌ Summani tushunmadim. Iltimos, faqat raqam bilan yozing.\n\n"
                 "Masalan: <code>1200000</code>"

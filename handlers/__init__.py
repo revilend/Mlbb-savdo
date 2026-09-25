@@ -14,11 +14,13 @@ __all__ = [
     "favorites",
     "garant",
     "inbox",
+    "moderation",
     "my_listings",
     "offers",
     "reviews",
     "scam_check",
     "search",
     "sell",
+    "settings_panel",
     "subscriptions",
 ]

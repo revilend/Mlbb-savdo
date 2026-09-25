@@ -35,6 +35,7 @@ from keyboards import (
     main_menu_kb,
     my_listing_kb,
 )
+from settings import settings
 from states import EditFSM, PriceDropFSM
 
 logger = logging.getLogger(__name__)
@@ -305,9 +306,9 @@ async def drop_price_apply(message: Message, state: FSMContext, bot: Bot) -> Non
         )
         return
 
-    if new_price < config.MIN_PRICE:
+    if new_price < int(settings.get("MIN_PRICE")):
         await message.answer(
-            f"⚠️ Narx juda past (kamida {format_price(config.MIN_PRICE)}). "
+            f"⚠️ Narx juda past (kamida {format_price(int(settings.get('MIN_PRICE')))}). "
             "Boshqa summa kiriting."
         )
         return
@@ -446,7 +447,8 @@ async def renew_listing(callback: CallbackQuery, bot: Bot) -> None:
 
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            f"✅ <b>Eʼlon #{listing_id} yana {config.LISTING_TTL_DAYS} kunga yangilandi.</b>\n\n"
+            f"✅ <b>Eʼlon #{listing_id} yana {settings.get('LISTING_TTL_DAYS')} kunga"
+            " yangilandi.</b>\n\n"
             "U kanalda qayta joylandi va roʻyxatda koʻrinadi."
         )
 
@@ -461,7 +463,7 @@ EDIT_PROMPTS = {
         "📝 <b>Izohni tahrirlash</b>\n\n"
         "🆔 Eʼlon: <b>#{listing_id}</b>\n"
         "📄 Hozirgi izoh: <i>{current}</i>\n\n"
-        f"Yangi izohni yozib yuboring (maks. {config.MAX_DESCRIPTION_LENGTH} belgi)."
+        f"Yangi izohni yozib yuboring (maks. {settings.get('MAX_DESCRIPTION_LENGTH')} belgi)."
     ),
     "contact": (
         "🔗 <b>Aloqani tahrirlash</b>\n\n"
@@ -631,9 +633,9 @@ async def edit_price_apply(message: Message, state: FSMContext, bot: Bot) -> Non
         )
         return
 
-    if price < config.MIN_PRICE or price > config.MAX_PRICE:
+    if price < int(settings.get("MIN_PRICE")) or price > int(settings.get("MAX_PRICE")):
         await message.answer(
-            f"⚠️ Narx {format_price(config.MIN_PRICE)} dan kam boʻlmasligi va "
+            f"⚠️ Narx {format_price(int(settings.get('MIN_PRICE')))} dan kam boʻlmasligi va "
             "juda katta boʻlmasligi kerak. Qaytadan kiriting."
         )
         return
@@ -662,7 +664,7 @@ async def edit_description_apply(message: Message, state: FSMContext, bot: Bot) 
         await message.answer("❌ Izoh juda qisqa. Iltimos, batafsilroq yozing.")
         return
 
-    text = text[: config.MAX_DESCRIPTION_LENGTH]
+    text = text[: int(settings.get("MAX_DESCRIPTION_LENGTH"))]
     await _apply_edit(
         message, state, bot, {"description": text}, f"📝 Yangi izoh: {esc(text)}"
     )

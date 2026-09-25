@@ -17,6 +17,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
+import ai
 import config
 from database import db
 from handlers.common import (
@@ -34,6 +35,7 @@ from handlers.common import (
 )
 from keyboards import (
     admin_panel_kb,
+    ai_panel_kb,
     admins_kb,
     cancel_kb,
     channels_kb,
@@ -41,9 +43,11 @@ from keyboards import (
     dm_user_kb,
     listing_action_kb,
     main_menu_kb,
+    moderation_kb,
     single_button_kb,
 )
 from handlers.subscriptions import notify_subscribers
+from settings import settings
 from states import AdminFSM
 
 logger = logging.getLogger(__name__)
@@ -273,6 +277,117 @@ async def adm_back(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.message.answer(ADMIN_PANEL_TEXT, reply_markup=admin_panel_kb())
 
 
+# ---------------------------------------------------------------------------
+# AI moderatsiya boshqaruvi
+# ---------------------------------------------------------------------------
+async def _render_ai_panel(callback: CallbackQuery, note: str = "") -> None:
+    """AI boshqaruv panelini chizadi."""
+    text = (
+        "🤖 <b>AI moderatsiya</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Holat: <b>{'✅ yoqilgan' if settings.get_bool('AI_ENABLED') else '⛔️ oʻchirilgan'}</b>\n"
+        f"Kalit: <code>{esc(settings.display('AI_API_KEY'))}</code>\n"
+        f"Model: <code>{esc(str(settings.get('AI_MODEL') or '—'))}</code>\n"
+        f"Manzil: <code>{esc(str(settings.get('AI_BASE_URL') or '—'))}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Avto-tasdiqlash: {settings.display('AI_AUTO_APPROVE')}\n"
+        f"Avto-rad (firibgarlik): {settings.display('AI_REJECT_SCAMS')}\n"
+        f"Minimal ishonch: <b>{settings.display('AI_MIN_CONFIDENCE')}</b>"
+    )
+    if note:
+        text += f"\n\n{note}"
+    text += (
+        "\n\nHar bir yangi e'lon AI orqali tekshiriladi va natija shu yerda "
+        "koʻrinadi. E'lon kartochkasidagi «🤖 AI tekshiruvi (qoʻlda)» tugmasi "
+        "bilan istalgan vaqtda qayta tekshirish mumkin."
+    )
+
+    if not isinstance(callback.message, Message):
+        return
+    try:
+        await callback.message.edit_text(
+            text, reply_markup=ai_panel_kb(), disable_web_page_preview=True
+        )
+    except TelegramAPIError:
+        try:
+            await callback.message.answer(
+                text, reply_markup=ai_panel_kb(), disable_web_page_preview=True
+            )
+        except TelegramAPIError:
+            pass
+
+
+@router.callback_query(F.data == "adm_ai")
+async def adm_ai(callback: CallbackQuery, state: FSMContext) -> None:
+    """«🤖 AI moderatsiya» boshqaruv paneli."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await state.clear()
+    await callback.answer()
+    await _render_ai_panel(callback)
+
+
+@router.callback_query(F.data == "adm_ai_toggle")
+async def adm_ai_toggle(callback: CallbackQuery) -> None:
+    """AI tekshiruvni bir tugma bilan yoqadi yoki oʻchiradi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    turning_on = not settings.get_bool("AI_ENABLED")
+    ok, message = await settings.set("AI_ENABLED", "true" if turning_on else "false")
+    if not ok:
+        await callback.answer(message[:190], show_alert=True)
+        return
+
+    if not turning_on:
+        note = "⛔️ AI tekshiruv oʻchirildi. E'lonlar faqat qoʻlda tekshiriladi."
+        await callback.answer("⛔️ AI oʻchirildi")
+    elif not str(settings.get("AI_API_KEY") or "").strip():
+        note = (
+            "✅ AI yoqildi, lekin <b>API kaliti kiritilmagan</b> — tekshiruv "
+            "ishlashi uchun «🔑 AI API kalitini kiritish» tugmasini bosing."
+        )
+        await callback.answer("✅ Yoqildi — kalit kerak", show_alert=True)
+    else:
+        note = f"✅ AI tekshiruv yoqildi. Holat: {ai.config_summary()}"
+        await callback.answer("✅ AI yoqildi")
+
+    await _render_ai_panel(callback, note=note)
+
+
+@router.callback_query(F.data.startswith("ai_chk_"))
+async def ai_check_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """«🤖 AI tekshiruvi (qoʻlda)» tugmasi — bitta e'lonni qayta tekshiradi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    raw_id = (callback.data or "").split("_", 2)[-1]
+    if not raw_id.isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    await callback.answer("🤖 AI tekshirilmoqda…")
+
+    # Aylanma importdan qochish uchun funksiya ichida chaqiriladi
+    from handlers.moderation import manual_ai_check
+
+    text, decided = await manual_ai_check(bot, int(raw_id))
+    if not isinstance(callback.message, Message):
+        return
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=None if decided else moderation_kb(int(raw_id)),
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError:
+        await callback.message.answer(text, disable_web_page_preview=True)
+
+
 @router.callback_query(F.data == "adm_stats")
 async def adm_stats(callback: CallbackQuery) -> None:
     """To'liq statistika."""
@@ -411,7 +526,7 @@ async def adm_backup(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer("💾 Nusxa tayyorlanmoqda…")
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    dest = os.path.join(config.BACKUP_DIR, f"market_backup_{stamp}.sqlite3")
+    dest = os.path.join(str(settings.get("BACKUP_DIR")), f"market_backup_{stamp}.sqlite3")
 
     ok = await db.backup_to(dest)
     if not ok:

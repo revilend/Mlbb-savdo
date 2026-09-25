@@ -11,7 +11,6 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-import config
 from database import db
 from handlers.common import (
     blacklist_warning,
@@ -24,6 +23,7 @@ from handlers.common import (
     send_listing_card,
     user_label,
 )
+from handlers.moderation import ai_moderate_listing
 from keyboards import (
     BTN_DONE,
     BTN_SELL,
@@ -37,6 +37,7 @@ from keyboards import (
     skip_kb,
     vip_kb,
 )
+from settings import settings
 from states import SellFSM
 
 logger = logging.getLogger(__name__)
@@ -87,18 +88,23 @@ CONTACT_ASK = (
     "yoki <code>https://t.me/username</code>"
 )
 
-DESCRIPTION_ASK = (
-    "6️⃣ <b>Qoʻshimcha izoh yozing.</b>\n\n"
-    "Masalan: <i>Email bogʻlangan, akkaunt 2 yildan beri meniki, "
-    "barcha hujjatlar bor.</i>\n\n"
-    f"Izoh {config.MAX_DESCRIPTION_LENGTH} belgidan oshmasin."
-)
+def description_ask() -> str:
+    """Izoh so'rovi (chegara bot ichidan sozlanadi)."""
+    return (
+        "6️⃣ <b>Qoʻshimcha izoh yozing.</b>\n\n"
+        "Masalan: <i>Email bogʻlangan, akkaunt 2 yildan beri meniki, "
+        "barcha hujjatlar bor.</i>\n\n"
+        f"Izoh {settings.get('MAX_DESCRIPTION_LENGTH')} belgidan oshmasin."
+    )
 
-PHOTOS_TEXT = (
-    "7️⃣ <b>Akkaunt rasmlarini yuboring.</b>\n\n"
-    f"1 tadan {config.MAX_PHOTOS} tagacha rasm qabul qilinadi.\n"
-    "Tayyor boʻlgach «✅ Tayyor» tugmasini bosing."
-)
+
+def photos_text() -> str:
+    """Rasmlar so'rovi (chegara bot ichidan sozlanadi)."""
+    return (
+        "7️⃣ <b>Akkaunt rasmlarini yuboring.</b>\n\n"
+        f"1 tadan {settings.get('MAX_PHOTOS')} tagacha rasm qabul qilinadi.\n"
+        "Tayyor boʻlgach «✅ Tayyor» tugmasini bosing."
+    )
 
 
 async def _ask(message: Message, text: str, markup=None) -> None:
@@ -115,7 +121,7 @@ async def ask_skins(message: Message, state: FSMContext) -> None:
 async def ask_photos(message: Message, state: FSMContext) -> None:
     """Rasmlar bosqichiga o'tadi."""
     await state.set_state(SellFSM.photos)
-    await _ask(message, PHOTOS_TEXT, markup=photos_kb())
+    await _ask(message, photos_text(), markup=photos_kb())
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +276,14 @@ async def sell_price(message: Message, state: FSMContext) -> None:
         )
         return
 
-    if price < config.MIN_PRICE:
+    if price < int(settings.get("MIN_PRICE")):
         await message.answer(
-            f"⚠️ Narx juda past koʻrinadi (kamida {format_price(config.MIN_PRICE)}).\n"
+            f"⚠️ Narx juda past koʻrinadi (kamida {format_price(int(settings.get('MIN_PRICE')))}).\n"
             "Iltimos, narxni qaytadan kiriting."
         )
         return
 
-    if price > config.MAX_PRICE:
+    if price > int(settings.get("MAX_PRICE")):
         await message.answer(
             "⚠️ Narx juda katta koʻrinadi. Iltimos, summani qaytadan tekshirib kiriting."
         )
@@ -339,7 +345,7 @@ async def sell_contact(message: Message, state: FSMContext) -> None:
 
     await state.update_data(contact=contact[:120])
     await state.set_state(SellFSM.description)
-    await message.answer(DESCRIPTION_ASK, reply_markup=skip_kb("desc_skip"))
+    await message.answer(description_ask(), reply_markup=skip_kb("desc_skip"))
 
 
 # ---------------------------------------------------------------------------
@@ -366,12 +372,11 @@ async def sell_description(message: Message, state: FSMContext) -> None:
         await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
         return
 
+    limit = int(settings.get("MAX_DESCRIPTION_LENGTH"))
     text = (message.text or "").strip()
-    if len(text) > config.MAX_DESCRIPTION_LENGTH:
-        text = text[: config.MAX_DESCRIPTION_LENGTH]
-        await message.answer(
-            f"ℹ️ Izoh {config.MAX_DESCRIPTION_LENGTH} belgigacha qisqartirildi."
-        )
+    if len(text) > limit:
+        text = text[:limit]
+        await message.answer(f"ℹ️ Izoh {limit} belgigacha qisqartirildi.")
 
     await state.update_data(description=text or "—")
     await ask_photos(message, state)
@@ -386,9 +391,10 @@ async def sell_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     photos: list[str] = list(data.get("photos") or [])
 
-    if len(photos) >= config.MAX_PHOTOS:
+    limit = int(settings.get("MAX_PHOTOS"))
+    if len(photos) >= limit:
         await message.answer(
-            f"⚠️ Maksimal {config.MAX_PHOTOS} ta rasm qabul qilinadi.\n"
+            f"⚠️ Maksimal {limit} ta rasm qabul qilinadi.\n"
             "«✅ Tayyor» tugmasini bosing."
         )
         return
@@ -398,7 +404,7 @@ async def sell_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(photos=photos)
 
     await message.answer(
-        f"✅ Rasm qabul qilindi ({len(photos)}/{config.MAX_PHOTOS}).\n"
+        f"✅ Rasm qabul qilindi ({len(photos)}/{limit}).\n"
         "Yana rasm yuboring yoki «✅ Tayyor» tugmasini bosing."
     )
 
@@ -497,6 +503,16 @@ async def sell_finish(message: Message, state: FSMContext, bot: Bot) -> None:
             f"{warning}\n\n"
             "Iltimos, eʼlonni chiqarishdan oldin tekshirib koʻring.",
             markup=moderation_kb(listing_id),
+        )
+
+    # AI moderatsiyasi (yoqilgan bo'lsa). Natija adminlarga alohida xabar bo'lib boradi;
+    # AI mustaqil qaror qabul qilgan bo'lsa, tugmalar ko'rsatilmaydi.
+    outcome = await ai_moderate_listing(bot, listing_id)
+    if outcome.text:
+        await notify_admin(
+            bot,
+            outcome.text,
+            markup=None if outcome.decided else moderation_kb(listing_id),
         )
 
 

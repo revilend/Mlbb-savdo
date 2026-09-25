@@ -101,6 +101,22 @@ TZ_OFFSET_HOURS: int = max(-12, min(14, _env_int("TZ_OFFSET_HOURS", 5)))
 DIGEST_HOUR: int = min(23, max(0, _env_int("DIGEST_HOUR", 23)))
 DIGEST_MINUTE: int = min(59, max(0, _env_int("DIGEST_MINUTE", 59)))
 
+# --- AI moderatsiya ---------------------------------------------------------
+# Bu qiymatlar bot ichidagi «🤖 AI moderatsiya» panelidan ham o'zgartiriladi;
+# bu yerdagilar faqat standart (boshlang'ich) qiymat hisoblanadi.
+AI_ENABLED: bool = _env_bool("AI_ENABLED", False)
+AI_API_KEY: str = _env_str("AI_API_KEY")
+AI_BASE_URL: str = (
+    _env_str("AI_BASE_URL", "https://openrouter.ai/api/v1")
+    or "https://openrouter.ai/api/v1"
+)
+AI_MODEL: str = _env_str("AI_MODEL", "openai/gpt-4o-mini") or "openai/gpt-4o-mini"
+AI_AUTO_APPROVE: bool = _env_bool("AI_AUTO_APPROVE", False)
+AI_MIN_CONFIDENCE: int = min(100, max(0, _env_int("AI_MIN_CONFIDENCE", 70)))
+AI_REJECT_SCAMS: bool = _env_bool("AI_REJECT_SCAMS", True)
+AI_TIMEOUT_SECONDS: int = max(5, min(120, _env_int("AI_TIMEOUT_SECONDS", 20)))
+AI_EXTRA_RULES: str = _env_str("AI_EXTRA_RULES")
+
 # --- Biznes qoidalari --------------------------------------------------------
 MAX_PHOTOS: int = 10
 MAX_DESCRIPTION_LENGTH: int = 300

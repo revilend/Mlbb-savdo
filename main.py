@@ -36,6 +36,7 @@ from handlers import (
     scam_check,
     search,
     sell,
+    settings_panel,
     subscriptions,
 )
 from handlers.common import (
@@ -45,6 +46,7 @@ from handlers.common import (
     send_listing_card,
 )
 from keyboards import listing_action_kb, set_bot_username, single_button_kb
+from settings import settings
 from middlewares import (
     SelfDestructMiddleware,
     UserMessageCleanerMiddleware,
@@ -84,6 +86,7 @@ def build_dispatcher() -> Dispatcher:
     dispatcher.include_router(calculator.router)
     dispatcher.include_router(scam_check.router)
     dispatcher.include_router(my_listings.router)
+    dispatcher.include_router(settings_panel.router)
     dispatcher.include_router(garant.router)
     dispatcher.include_router(common.fallback_router)
 
@@ -162,7 +165,7 @@ async def set_bot_commands(bot: Bot) -> None:
 
 def seconds_until(hour: int, minute: int, now: Optional[datetime] = None) -> float:
     """Mahalliy vaqt bo'yicha keyingi `hour:minute` gacha qolgan sekundlar."""
-    tz = timezone(timedelta(hours=config.TZ_OFFSET_HOURS))
+    tz = timezone(timedelta(hours=int(settings.get("TZ_OFFSET_HOURS"))))
     current = (now or datetime.now(timezone.utc)).astimezone(tz)
     target = current.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
     if target <= current:
@@ -176,7 +179,7 @@ def seconds_until_digest(now: Optional[datetime] = None) -> float:
     Hisobot mahalliy vaqt (`config.TZ_OFFSET_HOURS`) bo'yicha
     `DIGEST_HOUR:DIGEST_MINUTE` da yuboriladi (sukut: 23:59).
     """
-    return seconds_until(config.DIGEST_HOUR, config.DIGEST_MINUTE, now)
+    return seconds_until(int(settings.get("DIGEST_HOUR")), int(settings.get("DIGEST_MINUTE")), now)
 
 
 async def send_daily_digest(bot: Bot) -> None:
@@ -210,8 +213,8 @@ async def daily_digest_task(bot: Bot) -> None:
         delay = seconds_until_digest()
         logger.info(
             "Kunlik hisobot %02d:%02d da yuboriladi (%.0f sekunddan keyin).",
-            config.DIGEST_HOUR,
-            config.DIGEST_MINUTE,
+            settings.get("DIGEST_HOUR"),
+            settings.get("DIGEST_MINUTE"),
             delay,
         )
         try:
@@ -265,7 +268,7 @@ async def expire_overdue_listings(bot: Bot) -> int:
                 "⌛️ <b>Eʼloningiz amal muddati tugadi.</b>\n\n"
                 f"🆔 Eʼlon raqami: <b>#{listing_id}</b>\n\n"
                 "Eʼlon kanaldan yashirildi. Uni yana "
-                f"<b>{config.LISTING_TTL_DAYS} kunga</b> yangilash uchun "
+                f"<b>{settings.get('LISTING_TTL_DAYS')} kunga</b> yangilash uchun "
                 "quyidagi tugmani bosing.",
                 reply_markup=single_button_kb(
                     "🔄 Eʼlonni yangilash", f"renew_{listing_id}"
@@ -322,35 +325,52 @@ async def send_featured_post(bot: Bot) -> bool:
     return True
 
 
+#: Fon sikllari sozlama o'chirilganini qanchalik tez-tez tekshiradi (sekund)
+IDLE_CHECK_INTERVAL = 60
+
+
 async def daily_featured_task(bot: Bot) -> None:
-    """Har kuni belgilangan vaqtda kanalga tanlangan e'lonni joylaydi."""
+    """Har kuni belgilangan vaqtda kanalga tanlangan e'lonni joylaydi.
+
+    Sozlama bot ichidan o'chirilsa, sikl kutish rejimiga o'tadi va
+    qayta yoqilganda darhol ishlashda davom etadi.
+    """
     while True:
-        delay = seconds_until(config.FEATURED_HOUR, config.FEATURED_MINUTE)
+        if not settings.get_bool("FEATURED_ENABLED"):
+            await asyncio.sleep(IDLE_CHECK_INTERVAL)
+            continue
+
+        delay = seconds_until(
+            int(settings.get("FEATURED_HOUR")), int(settings.get("FEATURED_MINUTE"))
+        )
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             raise
 
         try:
-            await send_featured_post(bot)
+            if settings.get_bool("FEATURED_ENABLED"):
+                await send_featured_post(bot)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("Kunning tanlovini yuborishda xatolik: %s", exc)
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(IDLE_CHECK_INTERVAL)
 
 
 async def run_backup() -> Optional[str]:
     """Bazadan zaxira nusxa oladi va eski nusxalarni tozalaydi."""
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    dest = os.path.join(config.BACKUP_DIR, f"market_backup_{stamp}.sqlite3")
+    backup_dir = str(settings.get("BACKUP_DIR"))
+    dest = os.path.join(backup_dir, f"market_backup_{stamp}.sqlite3")
     if not await db.backup_to(dest):
         return None
 
-    pattern = os.path.join(config.BACKUP_DIR, "market_backup_*.sqlite3")
+    pattern = os.path.join(backup_dir, "market_backup_*.sqlite3")
     backups = sorted(glob.glob(pattern))
-    for stale in backups[: max(0, len(backups) - config.BACKUP_KEEP)]:
+    keep = max(1, int(settings.get("BACKUP_KEEP")))
+    for stale in backups[: max(0, len(backups) - keep)]:
         try:
             os.remove(stale)
             logger.info("Eski nusxa oʻchirildi: %s", stale)
@@ -362,33 +382,37 @@ async def run_backup() -> Optional[str]:
 async def daily_backup_task() -> None:
     """Har kuni bir marta bazaning zaxira nusxasini oladigan fon sikli."""
     while True:
-        delay = seconds_until(config.BACKUP_HOUR, 0)
+        if not settings.get_bool("BACKUP_ENABLED"):
+            await asyncio.sleep(IDLE_CHECK_INTERVAL)
+            continue
+
+        delay = seconds_until(int(settings.get("BACKUP_HOUR")), 0)
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             raise
 
         try:
-            await run_backup()
+            if settings.get_bool("BACKUP_ENABLED"):
+                await run_backup()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error("Zaxira nusxa olishda xatolik: %s", exc)
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(IDLE_CHECK_INTERVAL)
 
 
 def start_background_tasks(bot: Bot) -> List[asyncio.Task]:
     """Kunlik hisobot, e'lon muddati, tanlov posti va zaxira vazifalarini ishga tushiradi."""
-    tasks: List[asyncio.Task] = [start_daily_digest(bot)]
-    tasks.append(asyncio.create_task(listing_expiry_task(bot), name="listing_expiry"))
-
-    if config.FEATURED_ENABLED:
-        tasks.append(asyncio.create_task(daily_featured_task(bot), name="daily_featured"))
-    if config.BACKUP_ENABLED:
-        tasks.append(asyncio.create_task(daily_backup_task(), name="daily_backup"))
-
-    return tasks
+    # Barcha vazifalar doim ishga tushiriladi — yoqish/o'chirish bot ichidan
+    # boshqariladi, shuning uchun restart talab qilinmaydi.
+    return [
+        start_daily_digest(bot),
+        asyncio.create_task(listing_expiry_task(bot), name="listing_expiry"),
+        asyncio.create_task(daily_featured_task(bot), name="daily_featured"),
+        asyncio.create_task(daily_backup_task(), name="daily_backup"),
+    ]
 
 
 async def stop_background_tasks(tasks: List[asyncio.Task]) -> None:
@@ -421,6 +445,14 @@ async def main() -> None:
         raise
 
     await db.connect()
+
+    # Bot ichidan kiritilgan sozlamalarni yuklaymiz (`.env` — standart qiymat)
+    settings.load(await db.get_settings_by_prefix(settings.PREFIX))
+    logger.info(
+        "Sozlamalar yuklandi: %s tadan %s tasi bot ichidan oʻzgartirilgan.",
+        settings.total_count(),
+        settings.overridden_count(),
+    )
 
     bot = Bot(
         token=config.BOT_TOKEN,

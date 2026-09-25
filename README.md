@@ -37,6 +37,8 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 | 🛠️ Admin panel | Moderatsiya, tarqatish, adminlar, kanallar, qidiruv, qora ro'yxat, analitika, zaxira |
 | 🐢 Anti-flood | Har bir foydalanuvchi uchun so'rovlar chegarasi + bosqichli mute |
 | ⏱ Self-destruct | Bot xabarlari belgilangan vaqtdan keyin o'z-o'zidan o'chadi |
+| ⚙️ Bot ichidagi sozlamalar | Narx chegaralari, vaqtlar, kanal, garant, anti-flood, xabar TTL va AI — hammasi bot ichidan; `.env` shart emas |
+| 🤖 AI moderatsiya | E'lonlarni AI orqali tekshirish; admin bir tugma bilan yoqadi/o'chiradi, kalitni bot ichida kiritadi va istalgan e'lonni qo'lda qayta tekshiradi |
 
 ## 📁 Tuzilma
 
@@ -44,7 +46,9 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 .
 ├── env.example          # .env uchun namuna (nusxalab .env qiling)
 ├── requirements.txt
-├── config.py            # .env dan sozlamalar
+├── config.py            # .env dan standart sozlamalar
+├── settings.py          # bot ichidan boshqariladigan runtime sozlamalar reyestri
+├── ai.py                # OpenAI-mos AI moderatsiya mijozi
 ├── database.py          # aiosqlite qatlami (9 jadval)
 ├── keyboards.py         # barcha klaviatura va tugma matnlari
 ├── states.py            # FSM holatlari
@@ -56,7 +60,8 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 │   ├── test_anti_flood.py # anti-flood middleware testlari
 │   ├── test_self_destruct.py # TTL / reyestr / tozalagich testlari
 │   ├── test_features.py   # barter, narx tushirish, ulashish, kunlik hisobot, admin panel
-│   └── test_features2.py  # sharhlar, taklif/bitim, obuna, referal, muddat, analitika
+│   ├── test_features2.py  # sharhlar, taklif/bitim, obuna, referal, muddat, analitika
+│   └── test_features3.py  # bot ichidagi sozlamalar, AI moderatsiya va sozlamalar paneli
 ├── middlewares/
 │   ├── anti_flood.py      # spamga qarshi cheklov (sliding window + mute)
 │   └── self_destruct.py   # o'z-o'zini o'chiruvchi xabarlar + /clean reyestri
@@ -73,6 +78,8 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
     ├── calculator.py    # narx kalkulyatori
     ├── scam_check.py    # firibgarni tekshirish
     ├── my_listings.py   # mening e'lonlarim (sold / UP / tahrir / yangilash)
+    ├── moderation.py    # AI moderatsiya natijasini qo'llash (avto-tasdiq/rad)
+    ├── settings_panel.py # «⚙️ Sozlamalar» paneli (bot ichidan boshqaruv)
     ├── garant.py        # garant xizmati
     └── admin.py         # admin panel (analitika, zaxira nusxa bilan)
 ```
@@ -102,10 +109,15 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
    GARANT_USERNAME=my_garant      # garant akkunti (@ belgisisiz)
    ```
 
-   Anti-flood, xabarlarni tozalash, kunlik hisobot, e'lon muddati, kunning
-   tanlovi va zaxira nusxa sozlamalari ham `env.example` faylida izohlari
-   bilan keltirilgan (`FLOOD_*`, `SELF_DESTRUCT_*`, `DIGEST_*`,
-   `LISTING_TTL_DAYS`, `FEATURED_*`, `BACKUP_*`, `REFERRAL_REWARD_VIP`).
+   > **Faqat shu ikkitasi majburiy:** `BOT_TOKEN` va `ADMIN_ID`. Qolgan
+   > hamma narsani bot ichidan sozlash mumkin — loyihani sotib olgan kishi
+   > `.env` fayliga tegishi shart emas (pastdagi «Bot ichidan boshqaruv»
+   > bo'limiga qarang).
+
+   `env.example` faylida barcha sozlamalar (`FLOOD_*`, `SELF_DESTRUCT_*`,
+   `DIGEST_*`, `LISTING_TTL_DAYS`, `FEATURED_*`, `BACKUP_*`, `AI_*`,
+   `REFERRAL_REWARD_VIP`) izohlari bilan keltirilgan — ular standart
+   qiymat bo'lib qoladi.
 
 5. Botni kanalga **administrator** qilib qo'shing (a'zolikni tekshirishi va
    e'lon joylashi uchun shart).
@@ -146,6 +158,88 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
     `BACKUP_HOUR` da bazaning zaxira nusxasi olinadi.
 14. Har kuni 23:59 da barcha adminlarga kunlik hisobot (yangi a'zolar,
     e'lonlar, sotuvlar) yuboriladi.
+15. AI moderatsiya yoqilgan bo'lsa yangi e'lon darhol AI orqali tekshiriladi:
+    admin xabarida AI xulosasi (qaror, ishonch, sabab) ko'rinadi va sozlamaga
+    qarab e'lon avtomatik tasdiqlanadi yoki rad etiladi. AI oʻchirilgan boʻlsa
+    admin «🤖 AI tekshiruvi (qoʻlda)» tugmasi bilan istalgan eʼlonni qayta
+    tekshirishi mumkin.
+
+## ⚙️ Bot ichidan boshqaruv (sozlamalar paneli)
+
+Asosiy menyudagi **«⚙️ Sozlamalar»** bo'limi (admin panelda ham mavjud)
+orqali botni `.env` fayliga tegmasdan boshqarish mumkin:
+
+| Bo'lim | Nima sozlanadi |
+| --- | --- |
+| 💰 Narx va e'lonlar | eng kam/yuqori narx, rasm va izoh chegarasi, e'lon muddati, UP tanaffusi, oʻxshash narx farqi, referal mukofoti |
+| ⏰ Vaqt va hisobot | vaqt mintaqasi, kunlik hisobot vaqti, kunning tanlovi vaqti |
+| 📣 Kanal va garant | asosiy e'lon kanali, garant akkaunti |
+| 🤖 AI moderatsiya | yoqilgan/o'chirilgan, API kaliti, manzil, model, avto-qarorlar, ishonch chegarasi, qo'shimcha qoidalar |
+| 💾 Zaxira nusxa | yoqilgan/o'chirilgan, papka, soat, saqlanadigan nusxalar soni |
+| 🐢 Anti-flood | yoqilgan/o'chirilgan, oyna, hodisa chegarasi, mute vaqti, jimgina rejim, xabarlarni o'chirish |
+| ⏱ Xabarlar va tozalash | self-destruct TTL, `/clean` chegarasi |
+
+Ish printsipi:
+
+- `.env` dagi qiymatlar — **standart** qiymat bo'lib qoladi;
+- bot ichidan kiritilgan qiymat `settings` jadvalida `cfg:<KALIT>`
+  ko'rinishida saqlanadi va har doim ustuvor;
+- har bir sozlama yonida ✏️ (bot ichidan o'zgartirilgan) yoki • (standart)
+  belgisi va **«↩️ Standart qiymat»** tugmasi bor;
+- **AI kaliti** kabi maxfiy qiymatlar faqat niqoblangan holda ko'rsatiladi
+  (`sk-o…cdef`) va kiritilganda xabar chatdan o'chiriladi;
+- noto'g'ri qiymat (masalan harf o'rniga son kutilsa) saqlanmaydi — nima
+  xato ekani tushunarli qilib aytiladi;
+- anti-flood va self-destruct kabi ba'zi sozlamalar **qayta ishga tushgach**
+  kuchga kiradi (panel buni ogohlantiradi).
+
+## 🤖 AI moderatsiya
+
+AI moderatsiya e'lonni matni bo'yicha tekshiradi (rank, skinlar, narx, izoh,
+aloqa) va **TASDIQLASH / RAD ETISH / QO'LDA TEKSHIRISH** tavsiyasini ishonch
+darajasi bilan beradi. Bot **OpenAI-mos** `chat/completions` API'si bilan
+ishlaydi, shuning uchun bitta kalit bilan OpenRouter, OpenAI, Groq, DeepInfra,
+Together, Mistral yoki o'z serveringizdan foydalanish mumkin.
+
+**Admin panelidagi «🤖 AI» bo'limi** — bitta ekranda to'liq boshqaruv:
+
+| Tugma | Vazifasi |
+| --- | --- |
+| ✅ AI tekshiruvni yoqish / ⛔️ oʻchirish | AI moderatsiyani bir bosishda yoqadi yoki oʻchiradi (kalit bo'lmasa ogohlantiradi) |
+| 🔑 AI API kalitini kiritish | kalitni bot ichida kiritish (kiritilgan xabar chatdan o'chiriladi) |
+| 🔌 Ulanishni tekshirish | kalit, manzil va modelni darhol tekshiradi |
+| ⚙️ Barcha sozlamalar | model, `AI_BASE_URL`, avto-qarorlar, ishonch chegarasi, qo'shimcha qoidalar |
+
+Ekranning yuqorisida joriy holat (yoqilgan/oʻchiqilgan), niqoblangan kalit,
+model va manzil ko'rinib turadi.
+
+**Kalitni bot ichida qo'shish:**
+
+1. Admin panel → **🤖 AI** (yoki ⚙️ Sozlamalar → 🤖 AI moderatsiya) →
+   **AI API kaliti** (kalitni oddiy xabar qilib yuboring — u avtomatik
+   o'chiriladi).
+2. **AI modelini** tanlang (masalan `openai/gpt-4o-mini`) va kerak bo'lsa
+   `AI_BASE_URL` ni o'zgartiring.
+3. **AI tekshiruvni yoqing** va «🔌 Ulanishni tekshirish» tugmasini bosing —
+   kalit va ulanish darhol tekshiriladi.
+
+**Qo'lda tekshirish:** har bir moderatsiya kartochkasida
+«🤖 AI tekshiruvi (qoʻlda)» tugmasi bor — admin istalgan e'lonni (AI
+avtomatik ishlagan yoki ishlamagan bo'lsa ham) bir bosishda qayta tekshirishi
+va natijani darhol ko'rishi mumkin. AI oʻchirilgan yoki kalit kiritilmagan
+boʻlsa, tugma nima yetishmayotganini aniq aytadi.
+
+Qo'shimcha imkoniyatlar:
+
+| Sozlama | Natija |
+| --- | --- |
+| `AI_AUTO_APPROVE=true` | AI ishonchli deb topsa e'lon avtomatik kanalga chiqadi (admin baribir xabardor qilinadi) |
+| `AI_REJECT_SCAMS=true` | AI firibgarlik/spam deb topsa e'lon avtomatik rad etiladi |
+| `AI_MIN_CONFIDENCE` | avtomatik qaror uchun minimal ishonch darajasi (sukut: 70%) |
+| `AI_EXTRA_RULES` | AI uchun qo'shimcha qoidalar (masalan «10 000 so'mdan past narxni rad et») |
+
+AI yoqilmagan bo'lsa bot avvalgidek ishlayveradi — moderatsiya faqat admin
+qo'lda amalga oshiradi.
 
 ## 🐢 Anti-flood (spam himoyasi)
 
@@ -224,7 +318,7 @@ pytest tests/test_anti_flood.py -v
 pytest -k "mute or window"
 ```
 
-Suite **172 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
+Suite **245 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
 (Telegram API soxtalashtiriladi, vaqt `Clock` fixture'i bilan boshqariladi,
 shuning uchun testlar tez va deterministik).
 
@@ -234,6 +328,7 @@ shuning uchun testlar tez va deterministik).
 | `test_self_destruct.py` | 40 | `temporary`/`permanent`, `MessageRegistry`, rejalashtirish qoidalari (kanal/guruh himoyasi), haqiqiy o'chirish, `shutdown()`, session zanjiri integratsiyasi, `sweep_chat()`, foydalanuvchi tozalagichi |
 | `test_features.py` | 37 | barter/rejim anketasi, narx tushirish (kanal + sevimlilar), ulashish tugmasi, qo'llanma, kunlik hisobot, admin va kanal boshqaruvi, yangi DB ustunlari |
 | `test_features2.py` | 65 | sharhlar va reyting, taklif/bitim oqimi, obuna va mos e'lon xabari, referal, e'lon tahriri va yangilash, o'xshash e'lonlar, muddat/tanlov/zaxira fon vazifalari, analitika |
+| `test_features3.py` | 73 | bot ichidagi sozlamalar (validatsiya, niqoblash, standartga qaytarish, guruhlar), AI javobini tahlil qilish, HTTP mijozi (qayta urinish, xato xaritalari), avto-tasdiq/rad, qoʻlda tekshirish, AI yoqish/oʻchirish paneli, sozlamalar paneli navigatsiyasi va admin cheklovi |
 
 **Regressiya himoyasi:** `test_default_settings_are_gentle` sukut qiymatlar
 yumshoq rejimda qolishini kafolatlaydi — kimdir chegaralarni qattiqlashtirsa,
@@ -243,7 +338,8 @@ test darhol yiqiladi.
 
 `market_database.sqlite3` fayli birinchi ishga tushirishda avtomatik yaratiladi.
 
-- `settings` — dinamik sozlamalar (kanallar, adminlar ro'yxati)
+- `settings` — dinamik sozlamalar: adminlar ro'yxati, kanallar va bot ichidan
+  kiritilgan barcha `cfg:*` qiymatlar (narx, vaqt, AI kaliti va hokazo)
 - `users` — foydalanuvchilar (`referred_by`, `free_vip` bilan)
 - `listings` — e'lonlar (`sell` / `buy`, `listing_mode` `sell`/`trade`, `expires_at`)
 - `favorites` — sevimlilar

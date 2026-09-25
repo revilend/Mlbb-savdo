@@ -62,6 +62,12 @@ class SavedSearchFSM(StatesGroup):
     waiting_keyword = State()
 
 
+class SettingsFSM(StatesGroup):
+    """Bot sozlamalarini bot ichidan tahrirlash."""
+
+    waiting_value = State()
+
+
 class CalcFSM(StatesGroup):
     """Akkaunt narxini hisoblash."""
 
