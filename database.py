@@ -6,9 +6,12 @@ Butun modul bo'ylab bitta global `db` obyekti ishlatiladi.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
@@ -27,11 +30,13 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    user_id   INTEGER PRIMARY KEY,
-    username  TEXT,
-    full_name TEXT,
-    is_banned INTEGER DEFAULT 0,
-    joined_at TIMESTAMP
+    user_id     INTEGER PRIMARY KEY,
+    username    TEXT,
+    full_name   TEXT,
+    is_banned   INTEGER DEFAULT 0,
+    referred_by INTEGER,
+    free_vip    INTEGER DEFAULT 0,
+    joined_at   TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS listings (
@@ -53,7 +58,52 @@ CREATE TABLE IF NOT EXISTS listings (
     status          TEXT DEFAULT 'pending',
     last_bumped     TIMESTAMP,
     sold_at         TIMESTAMP,
+    expires_at      TIMESTAMP,
     created_at      TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id  INTEGER,
+    seller_id   INTEGER NOT NULL,
+    reviewer_id INTEGER NOT NULL,
+    rating      INTEGER NOT NULL,
+    comment     TEXT,
+    created_at  TIMESTAMP,
+    UNIQUE (reviewer_id, seller_id)
+);
+
+CREATE TABLE IF NOT EXISTS saved_searches (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    min_price  INTEGER,
+    max_price  INTEGER,
+    keyword    TEXT,
+    created_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS offers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    buyer_id   INTEGER NOT NULL,
+    seller_id  INTEGER NOT NULL,
+    amount     INTEGER,
+    offer_text TEXT,
+    is_trade   INTEGER DEFAULT 0,
+    status     TEXT DEFAULT 'pending',
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS deals (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    seller_id  INTEGER NOT NULL,
+    buyer_id   INTEGER NOT NULL,
+    amount     INTEGER,
+    status     TEXT DEFAULT 'new',
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS favorites (
@@ -74,22 +124,41 @@ CREATE INDEX IF NOT EXISTS idx_listings_status ON listings (status);
 CREATE INDEX IF NOT EXISTS idx_listings_user   ON listings (user_id);
 CREATE INDEX IF NOT EXISTS idx_favorites_user  ON favorites (user_id);
 CREATE INDEX IF NOT EXISTS idx_listings_sold   ON listings (sold_at);
+CREATE INDEX IF NOT EXISTS idx_reviews_seller  ON reviews (seller_id);
+CREATE INDEX IF NOT EXISTS idx_offers_seller   ON offers (seller_id);
+CREATE INDEX IF NOT EXISTS idx_offers_buyer    ON offers (buyer_id);
+CREATE INDEX IF NOT EXISTS idx_deals_users     ON deals (buyer_id, seller_id);
+CREATE INDEX IF NOT EXISTS idx_searches_user   ON saved_searches (user_id);
 """
 
-#: Eski bazalarni yangilash uchun qo'shimcha ustunlar.
+#: Jadval nomi -> qo'shilishi mumkin bo'lgan ustunlar ro'yxati.
 #: `CREATE TABLE IF NOT EXISTS` mavjud jadvalga ustun qo'shmaydi, shu sababli
 #: har bir ustun alohida tekshirilib, yetishmasa `ALTER TABLE` bilan qo'shiladi.
-_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("listing_mode", "ALTER TABLE listings ADD COLUMN listing_mode TEXT NOT NULL DEFAULT 'sell'"),
-    ("trade_wanted", "ALTER TABLE listings ADD COLUMN trade_wanted TEXT"),
-    ("old_price", "ALTER TABLE listings ADD COLUMN old_price TEXT"),
-    ("sold_at", "ALTER TABLE listings ADD COLUMN sold_at TIMESTAMP"),
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "listings",
+        "listing_mode",
+        "ALTER TABLE listings ADD COLUMN listing_mode TEXT NOT NULL DEFAULT 'sell'",
+    ),
+    ("listings", "trade_wanted", "ALTER TABLE listings ADD COLUMN trade_wanted TEXT"),
+    ("listings", "old_price", "ALTER TABLE listings ADD COLUMN old_price TEXT"),
+    ("listings", "sold_at", "ALTER TABLE listings ADD COLUMN sold_at TIMESTAMP"),
+    ("listings", "expires_at", "ALTER TABLE listings ADD COLUMN expires_at TIMESTAMP"),
+    ("users", "referred_by", "ALTER TABLE users ADD COLUMN referred_by INTEGER"),
+    ("users", "free_vip", "ALTER TABLE users ADD COLUMN free_vip INTEGER DEFAULT 0"),
 )
 
 
 def utcnow_iso() -> str:
     """Hozirgi UTC vaqtni ISO ko'rinishida qaytaradi (sekundlar aniqligida)."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def days_from_now_iso(days: int) -> str:
+    """Hozirdan `days` kun keyingi vaqtni ISO ko'rinishida qaytaradi."""
+    return (
+        datetime.now(timezone.utc) + timedelta(days=int(days))
+    ).replace(microsecond=0).isoformat()
 
 
 def day_bounds_iso(
@@ -170,14 +239,19 @@ class Database:
 
     async def _apply_migrations(self) -> None:
         """Yetishmayotgan ustunlarni qo'shadi (idempotent)."""
-        async with self._conn.execute("PRAGMA table_info(listings)") as cursor:  # type: ignore[union-attr]
-            existing = {row["name"] for row in await cursor.fetchall()}
+        existing: dict[str, set[str]] = {}
+        for table, _column, _statement in _MIGRATIONS:
+            if table in existing:
+                continue
+            async with self._conn.execute(f"PRAGMA table_info({table})") as cursor:  # type: ignore[union-attr]
+                existing[table] = {row["name"] for row in await cursor.fetchall()}
 
-        for column, statement in _MIGRATIONS:
-            if column in existing:
+        for table, column, statement in _MIGRATIONS:
+            if column in existing.get(table, set()):
                 continue
             await self._conn.execute(statement)  # type: ignore[union-attr]
-            logger.info("Migratsiya qoʻllandi: listings.%s", column)
+            existing.setdefault(table, set()).add(column)
+            logger.info("Migratsiya qoʻllandi: %s.%s", table, column)
 
     async def close(self) -> None:
         """Ulanishni yopadi."""
@@ -349,8 +423,19 @@ class Database:
         user_id: int,
         username: Optional[str] = None,
         full_name: Optional[str] = None,
-    ) -> None:
-        """Foydalanuvchini qo'shadi yoki ma'lumotlarini yangilaydi."""
+    ) -> bool:
+        """Foydalanuvchini qo'shadi yoki ma'lumotlarini yangilaydi.
+
+        Qaytaradi: foydalanuvchi **yangi** bo'lsa `True`, avvaldan mavjud
+        bo'lsa `False` (referal bonusini ikki marta bermaslik uchun kerak).
+        """
+        # `ON CONFLICT DO UPDATE` da `rowcount` har doim 1 bo'ladi, shuning uchun
+        # foydalanuvchi yangi ekanligini alohida so'rov bilan aniqlaymiz.
+        async with self.conn.execute(
+            "SELECT 1 FROM users WHERE user_id = ? LIMIT 1", (int(user_id),)
+        ) as cursor:
+            existed = await cursor.fetchone() is not None
+
         await self.conn.execute(
             """
             INSERT INTO users (user_id, username, full_name, joined_at)
@@ -362,6 +447,7 @@ class Database:
             (user_id, username, full_name, utcnow_iso()),
         )
         await self.conn.commit()
+        return not existed
 
     async def get_user(self, user_id: int) -> Optional[dict]:
         """Bitta foydalanuvchini qaytaradi."""
@@ -452,8 +538,8 @@ class Database:
                 user_id, listing_type, listing_mode, trade_wanted,
                 rank_info, skins_info, price_numeric,
                 price_display, old_price, contact, description, is_vip, photos,
-                channel_msg_id, status, last_bumped, sold_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?)
+                channel_msg_id, status, last_bumped, sold_at, expires_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)
             """,
             (
                 user_id,
@@ -469,6 +555,7 @@ class Database:
                 1 if is_vip else 0,
                 json.dumps(photos, ensure_ascii=False),
                 status,
+                days_from_now_iso(config.LISTING_TTL_DAYS),
                 created,
             ),
         )
@@ -623,6 +710,19 @@ class Database:
             row = await cursor.fetchone()
         return self._normalize_listing(row)
 
+    async def get_featured_listing(self) -> Optional[dict]:
+        """«Kunning tanlovi» uchun e'lon: VIP e'lonlar ustuvor, keyin tasodifiy."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM listings
+             WHERE status = 'active'
+             ORDER BY is_vip DESC, RANDOM()
+             LIMIT 1
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+        return self._normalize_listing(row)
+
     async def get_filtered_listings(
         self,
         min_p: Optional[int] = None,
@@ -766,6 +866,520 @@ class Database:
         await self.conn.commit()
         return bool(cursor.rowcount)
 
+    # ------------------------------------------- listings: tahrir va amal muddati
+    #: `update_listing_fields()` orqali o'zgartirish mumkin bo'lgan ustunlar.
+    EDITABLE_LISTING_FIELDS = frozenset(
+        {
+            "price_numeric",
+            "price_display",
+            "old_price",
+            "description",
+            "contact",
+            "rank_info",
+            "skins_info",
+            "trade_wanted",
+        }
+    )
+
+    async def update_listing_fields(self, listing_id: int, **fields: Any) -> Optional[dict]:
+        """E'lonning ruxsat etilgan maydonlarini yangilaydi."""
+        allowed = {key: value for key, value in fields.items() if key in self.EDITABLE_LISTING_FIELDS}
+        if not allowed:
+            return await self.get_listing(listing_id)
+
+        assignments = ", ".join(f"{key} = ?" for key in allowed)
+        params: list[Any] = list(allowed.values()) + [int(listing_id)]
+        await self.conn.execute(
+            f"UPDATE listings SET {assignments} WHERE id = ?", tuple(params)
+        )
+        await self.conn.commit()
+        logger.info("Eʼlon #%s tahrirlandi: %s", listing_id, ", ".join(allowed))
+        return await self.get_listing(listing_id)
+
+    async def touch_listing_expiry(self, listing_id: int, days: Optional[int] = None) -> None:
+        """E'lonning amal muddatini hozirdan boshlab uzaytiradi."""
+        ttl = config.LISTING_TTL_DAYS if days is None else max(1, int(days))
+        await self.conn.execute(
+            "UPDATE listings SET expires_at = ? WHERE id = ?",
+            (days_from_now_iso(ttl), int(listing_id)),
+        )
+        await self.conn.commit()
+
+    async def get_expired_listings(self, limit: int = 50) -> list[dict]:
+        """Muddati o'tgan, lekin hali arxivga tushmagan aktiv e'lonlar."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM listings
+             WHERE status = 'active'
+               AND expires_at IS NOT NULL
+               AND expires_at <= ?
+             ORDER BY id ASC
+             LIMIT ?
+            """,
+            (utcnow_iso(), int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return self._normalize_rows(rows)
+
+    async def get_similar_listings(self, listing_id: int, limit: int = 3) -> list[dict]:
+        """O'xshash aktiv e'lonlar (narx oralig'i va rank bo'yicha)."""
+        base = await self.get_listing(listing_id)
+        if base is None:
+            return []
+
+        query = "SELECT * FROM listings WHERE status = 'active' AND id != ?"
+        params: list[Any] = [int(listing_id)]
+
+        price = base.get("price_numeric")
+        if price:
+            tolerance = config.SIMILAR_PRICE_TOLERANCE
+            low = int(int(price) * (1 - tolerance))
+            high = int(int(price) * (1 + tolerance))
+            query += " AND price_numeric IS NOT NULL AND price_numeric BETWEEN ? AND ?"
+            params.extend([low, high])
+        else:
+            rank = (base.get("rank_info") or "").strip()
+            if rank:
+                query += " AND rank_info = ?"
+                params.append(rank)
+
+        rank_value = (base.get("rank_info") or "").strip()
+        query += " ORDER BY (rank_info = ?) DESC, is_vip DESC, id DESC LIMIT ?"
+        params.extend([rank_value, int(limit)])
+
+        async with self.conn.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        return self._normalize_rows(rows)
+
+    # ------------------------------------------------------------------ reviews
+    async def add_review(
+        self,
+        listing_id: Optional[int],
+        seller_id: int,
+        reviewer_id: int,
+        rating: int,
+        comment: str = "",
+    ) -> bool:
+        """Sotuvchi haqida sharh qoldiradi (bir foydalanuvchi — bitta sharh)."""
+        score = max(1, min(5, int(rating)))
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO reviews (listing_id, seller_id, reviewer_id, rating, comment, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(reviewer_id, seller_id) DO UPDATE SET
+                listing_id = excluded.listing_id,
+                rating     = excluded.rating,
+                comment    = excluded.comment,
+                created_at = excluded.created_at
+            """,
+            (
+                int(listing_id) if listing_id else None,
+                int(seller_id),
+                int(reviewer_id),
+                score,
+                (comment or "")[:300],
+                utcnow_iso(),
+            ),
+        )
+        await self.conn.commit()
+        return bool(cursor.rowcount)
+
+    async def get_seller_rating(self, seller_id: int) -> tuple[float, int]:
+        """Sotuvchining o'rtacha bahosi va sharhlar soni: (o'rtacha, soni)."""
+        async with self.conn.execute(
+            "SELECT AVG(rating) AS avg_rating, COUNT(*) AS cnt FROM reviews WHERE seller_id = ?",
+            (int(seller_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or not row["cnt"]:
+            return 0.0, 0
+        return round(float(row["avg_rating"] or 0.0), 1), int(row["cnt"])
+
+    async def get_seller_reviews(self, seller_id: int, limit: int = 5) -> list[dict]:
+        """Sotuvchi haqidagi oxirgi sharhlar."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM reviews
+             WHERE seller_id = ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (int(seller_id), int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def has_reviewed(self, reviewer_id: int, seller_id: int) -> bool:
+        """Foydalanuvchi bu sotuvchi haqida sharh qoldirganmi?"""
+        async with self.conn.execute(
+            "SELECT 1 FROM reviews WHERE reviewer_id = ? AND seller_id = ? LIMIT 1",
+            (int(reviewer_id), int(seller_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row is not None
+
+    # ---------------------------------------------------------- saved searches
+    async def add_saved_search(
+        self,
+        user_id: int,
+        min_price: Optional[int] = None,
+        max_price: Optional[int] = None,
+        keyword: str = "",
+    ) -> int:
+        """Saqlangan qidiruv (obuna) yaratadi va uning ID sini qaytaradi."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO saved_searches (user_id, min_price, max_price, keyword, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(user_id),
+                int(min_price) if min_price else None,
+                int(max_price) if max_price else None,
+                (keyword or "").strip()[:120],
+                utcnow_iso(),
+            ),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def get_saved_searches(self, user_id: int) -> list[dict]:
+        """Foydalanuvchining saqlangan qidiruvlari."""
+        async with self.conn.execute(
+            "SELECT * FROM saved_searches WHERE user_id = ? ORDER BY id DESC",
+            (int(user_id),),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def remove_saved_search(self, search_id: int, user_id: Optional[int] = None) -> bool:
+        """Saqlangan qidiruvni o'chiradi (egasi tekshiriladi)."""
+        query = "DELETE FROM saved_searches WHERE id = ?"
+        params: list[Any] = [int(search_id)]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            params.append(int(user_id))
+        cursor = await self.conn.execute(query, tuple(params))
+        await self.conn.commit()
+        return bool(cursor.rowcount)
+
+    async def match_saved_searches(self, listing: dict) -> list[dict]:
+        """E'longa mos keladigan obunalar (e'lon egasidan tashqari)."""
+        owner_id = int(listing.get("user_id") or 0)
+        price = listing.get("price_numeric")
+        haystack = " ".join(
+            str(listing.get(field) or "")
+            for field in ("rank_info", "skins_info", "description", "trade_wanted")
+        ).lower()
+
+        matches: list[dict] = []
+        for search in await self.get_all_saved_searches():
+            if int(search["user_id"]) == owner_id:
+                continue
+            low, high = search.get("min_price"), search.get("max_price")
+            if low is not None or high is not None:
+                if not price:
+                    continue
+                if low is not None and int(price) < int(low):
+                    continue
+                if high is not None and int(price) > int(high):
+                    continue
+            keyword = str(search.get("keyword") or "").strip().lower()
+            if keyword and keyword not in haystack:
+                continue
+            matches.append(search)
+        return matches
+
+    async def get_all_saved_searches(self) -> list[dict]:
+        """Barcha saqlangan qidiruvlar (mos kelishini hisoblash uchun)."""
+        async with self.conn.execute("SELECT * FROM saved_searches ORDER BY id ASC") as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ------------------------------------------------------------------- offers
+    async def create_offer(
+        self,
+        listing_id: int,
+        buyer_id: int,
+        seller_id: int,
+        amount: Optional[int] = None,
+        offer_text: str = "",
+        is_trade: bool = False,
+    ) -> int:
+        """Taklifni bazaga saqlaydi va uning ID sini qaytaradi."""
+        now = utcnow_iso()
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO offers (
+                listing_id, buyer_id, seller_id, amount, offer_text,
+                is_trade, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                int(listing_id),
+                int(buyer_id),
+                int(seller_id),
+                int(amount) if amount else None,
+                (offer_text or "")[:300],
+                1 if is_trade else 0,
+                now,
+                now,
+            ),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def get_offer(self, offer_id: int) -> Optional[dict]:
+        """Taklifni ID bo'yicha qaytaradi."""
+        async with self.conn.execute("SELECT * FROM offers WHERE id = ?", (int(offer_id),)) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_offer_status(self, offer_id: int, status: str) -> Optional[dict]:
+        """Taklif holatini yangilaydi va joriy yozuvni qaytaradi."""
+        await self.conn.execute(
+            "UPDATE offers SET status = ?, updated_at = ? WHERE id = ?",
+            (str(status), utcnow_iso(), int(offer_id)),
+        )
+        await self.conn.commit()
+        return await self.get_offer(offer_id)
+
+    async def get_user_offers(
+        self,
+        user_id: int,
+        side: str = "all",
+        limit: int = 10,
+        only_pending: bool = False,
+    ) -> list[dict]:
+        """Foydalanuvchiga tegishli takliflar (`side`: all/seller/buyer)."""
+        query = "SELECT * FROM offers WHERE 1 = 1"
+        params: list[Any] = []
+        if side == "seller":
+            query += " AND seller_id = ?"
+            params.append(int(user_id))
+        elif side == "buyer":
+            query += " AND buyer_id = ?"
+            params.append(int(user_id))
+        else:
+            query += " AND (seller_id = ? OR buyer_id = ?)"
+            params.extend([int(user_id), int(user_id)])
+        if only_pending:
+            query += " AND status = 'pending'"
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        async with self.conn.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def count_pending_offers(self, seller_id: int) -> int:
+        """Sotuvchida javob kutilayotgan takliflar soni."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM offers WHERE seller_id = ? AND status = 'pending'",
+            (int(seller_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    # -------------------------------------------------------------------- deals
+    async def create_deal(
+        self,
+        listing_id: int,
+        seller_id: int,
+        buyer_id: int,
+        amount: Optional[int] = None,
+    ) -> int:
+        """Yangi bitimni qayd etadi va uning ID sini qaytaradi."""
+        now = utcnow_iso()
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO deals (listing_id, seller_id, buyer_id, amount, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'new', ?, ?)
+            """,
+            (
+                int(listing_id),
+                int(seller_id),
+                int(buyer_id),
+                int(amount) if amount else None,
+                now,
+                now,
+            ),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def get_deal(self, deal_id: int) -> Optional[dict]:
+        """Bitimni ID bo'yicha qaytaradi."""
+        async with self.conn.execute("SELECT * FROM deals WHERE id = ?", (int(deal_id),)) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def update_deal_status(self, deal_id: int, status: str) -> Optional[dict]:
+        """Bitim holatini yangilaydi va joriy yozuvni qaytaradi."""
+        await self.conn.execute(
+            "UPDATE deals SET status = ?, updated_at = ? WHERE id = ?",
+            (str(status), utcnow_iso(), int(deal_id)),
+        )
+        await self.conn.commit()
+        return await self.get_deal(deal_id)
+
+    async def get_user_deals(self, user_id: int, limit: int = 10) -> list[dict]:
+        """Foydalanuvchi ishtirok etgan bitimlar."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM deals
+             WHERE seller_id = ? OR buyer_id = ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (int(user_id), int(user_id), int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ---------------------------------------------------------------- referallar
+    async def set_referrer(self, user_id: int, referrer_id: int) -> bool:
+        """Yangi foydalanuvchiga taklif qilgan do'stini biriktiradi."""
+        user_id, referrer_id = int(user_id), int(referrer_id)
+        if user_id == referrer_id:
+            return False
+
+        # Foydalanuvchi yozuvi hali bo'lmasa ham ishlashi uchun avval uni yaratamiz
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, joined_at) VALUES (?, ?)",
+            (user_id, utcnow_iso()),
+        )
+        cursor = await self.conn.execute(
+            "UPDATE users SET referred_by = ? WHERE user_id = ? AND referred_by IS NULL",
+            (referrer_id, user_id),
+        )
+        await self.conn.commit()
+        return bool(cursor.rowcount)
+
+    async def count_referrals(self, referrer_id: int) -> int:
+        """Taklif qilingan do'stlar soni."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM users WHERE referred_by = ?", (int(referrer_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    async def add_free_vip(self, user_id: int, count: int = 1) -> int:
+        """Foydalanuvchiga bepul VIP e'lon kreditlarini qo'shadi."""
+        await self.conn.execute(
+            "UPDATE users SET free_vip = COALESCE(free_vip, 0) + ? WHERE user_id = ?",
+            (max(0, int(count)), int(user_id)),
+        )
+        await self.conn.commit()
+        return await self.get_free_vip(user_id)
+
+    async def get_free_vip(self, user_id: int) -> int:
+        """Foydalanuvchidagi bepul VIP kreditlari soni."""
+        async with self.conn.execute(
+            "SELECT COALESCE(free_vip, 0) AS cnt FROM users WHERE user_id = ?", (int(user_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    async def consume_free_vip(self, user_id: int) -> bool:
+        """Bitta bepul VIP kreditini sarflaydi. Kredit bo'lmasa `False`."""
+        cursor = await self.conn.execute(
+            "UPDATE users SET free_vip = free_vip - 1 WHERE user_id = ? AND COALESCE(free_vip, 0) > 0",
+            (int(user_id),),
+        )
+        await self.conn.commit()
+        return bool(cursor.rowcount)
+
+    # ------------------------------------------------------------- analitika
+    async def get_daily_activity(
+        self,
+        days: int = 7,
+        offset_hours: Optional[int] = None,
+    ) -> list[dict]:
+        """Oxirgi `days` kun uchun kunlik ko'rsatkichlar."""
+        tz = timezone(timedelta(hours=int(config.TZ_OFFSET_HOURS if offset_hours is None else offset_hours)))
+        now_local = datetime.now(timezone.utc).astimezone(tz)
+        result: list[dict] = []
+
+        for index in range(max(1, int(days)) - 1, -1, -1):
+            day = now_local - timedelta(days=index)
+            start_local = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_local = start_local + timedelta(days=1)
+            start = start_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+            end = end_local.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+            async with self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM users WHERE joined_at >= ? AND joined_at < ?",
+                (start, end),
+            ) as cursor:
+                row = await cursor.fetchone()
+            users = int(row["cnt"]) if row else 0
+
+            async with self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM listings WHERE created_at >= ? AND created_at < ?",
+                (start, end),
+            ) as cursor:
+                row = await cursor.fetchone()
+            listings = int(row["cnt"]) if row else 0
+
+            async with self.conn.execute(
+                "SELECT COUNT(*) AS cnt FROM listings WHERE sold_at >= ? AND sold_at < ?",
+                (start, end),
+            ) as cursor:
+                row = await cursor.fetchone()
+            sold = int(row["cnt"]) if row else 0
+
+            result.append(
+                {
+                    "date": start_local.strftime("%d.%m"),
+                    "users": users,
+                    "listings": listings,
+                    "sold": sold,
+                }
+            )
+        return result
+
+    async def get_top_sellers(self, days: int = 30, limit: int = 5) -> list[dict]:
+        """Oxirgi `days` kunda eng ko'p akkaunt sotgan foydalanuvchilar."""
+        since = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+        ).replace(microsecond=0).isoformat()
+        async with self.conn.execute(
+            """
+            SELECT user_id, COUNT(*) AS cnt
+              FROM listings
+             WHERE status IN ('sold', 'found')
+               AND COALESCE(sold_at, created_at) >= ?
+             GROUP BY user_id
+             ORDER BY cnt DESC, user_id ASC
+             LIMIT ?
+            """,
+            (since, int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [{"user_id": int(row["user_id"]), "count": int(row["cnt"])} for row in rows]
+
+    # ---------------------------------------------------------------- zaxira
+    async def backup_to(self, dest_path: str) -> bool:
+        """Bazaning izchil nusxasini `dest_path` ga yozadi.
+
+        Avval WAL jurnali checkpoint qilinadi (nusxa to'liq bo'lishi uchun),
+        so'ng fayl alohida oqimda ko'chiriladi — event loop bloklanmasin.
+        """
+        try:
+            await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await self.conn.commit()
+        except Exception as exc:  # checkpoint ishlamasa ham nusxa olishga harakat qilamiz
+            logger.warning("WAL checkpoint bajarilmadi: %s", exc)
+
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+            await asyncio.to_thread(shutil.copy2, self.path, dest_path)
+            logger.info("Baza nusxasi saqlandi: %s", dest_path)
+            return True
+        except OSError as exc:
+            logger.error("Baza nusxasini saqlab boʻlmadi: %s", exc)
+            return False
+
     # ------------------------------------------------------------------- stats
     async def get_stats(self) -> tuple[int, int, int]:
         """(jami foydalanuvchilar, aktiv e'lonlar, sotilgan akkauntlar)."""
@@ -797,9 +1411,15 @@ class Database:
             "active": 0,
             "sold": 0,
             "rejected": 0,
+            "expired": 0,
             "buy_requests": 0,
             "favorites": 0,
             "blacklist": 0,
+            "reviews": 0,
+            "offers": 0,
+            "pending_offers": 0,
+            "deals": 0,
+            "open_deals": 0,
         }
         async with self.conn.execute("SELECT COUNT(*) AS cnt FROM users") as cursor:
             row = await cursor.fetchone()
@@ -834,6 +1454,30 @@ class Database:
         async with self.conn.execute("SELECT COUNT(*) AS cnt FROM blacklist") as cursor:
             row = await cursor.fetchone()
         result["blacklist"] = int(row["cnt"]) if row else 0
+
+        async with self.conn.execute("SELECT COUNT(*) AS cnt FROM reviews") as cursor:
+            row = await cursor.fetchone()
+        result["reviews"] = int(row["cnt"]) if row else 0
+
+        async with self.conn.execute("SELECT COUNT(*) AS cnt FROM offers") as cursor:
+            row = await cursor.fetchone()
+        result["offers"] = int(row["cnt"]) if row else 0
+
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM offers WHERE status = 'pending'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        result["pending_offers"] = int(row["cnt"]) if row else 0
+
+        async with self.conn.execute("SELECT COUNT(*) AS cnt FROM deals") as cursor:
+            row = await cursor.fetchone()
+        result["deals"] = int(row["cnt"]) if row else 0
+
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM deals WHERE status IN ('new', 'garant')"
+        ) as cursor:
+            row = await cursor.fetchone()
+        result["open_deals"] = int(row["cnt"]) if row else 0
 
         return result
 

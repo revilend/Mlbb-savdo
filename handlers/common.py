@@ -23,14 +23,17 @@ from database import db, parse_dt
 from middlewares import messages as message_registry
 from middlewares import permanent, sweep_chat, temporary
 from keyboards import (
+    BTN_CANCEL,
+    BTN_GUIDE,
+    BTN_REFERRAL,
+    BTN_STATS,
     admin_panel_kb,
     guide_kb,
     listing_action_kb,
     main_menu_kb,
+    referral_kb,
+    referral_link,
     subscribe_kb,
-    BTN_CANCEL,
-    BTN_GUIDE,
-    BTN_STATS,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,7 +106,19 @@ GUIDE_TEXT = (
     "eski narx ustidan chizilib, yangisi ajratib koʻrsatiladi va eʼlonni "
     "sevimlilarga saqlaganlarga darhol xabar boradi;\n"
     "• Eʼlonni <b>24 soatda bir marta</b> koʻtarish (UP) mumkin;\n"
+    "• <b>✏️ Tahrirlash</b> orqali narx/izoh/aloqani oʻzgartirishingiz mumkin;\n"
+    "• Eʼlon <b>14 kun</b> amal qiladi, muddati tugasa «🔄 Yangilash» tugmasi chiqadi;\n"
     "• Sotilgach «✅ Sotildi deb belgilash» tugmasini bosishni unutmang.\n\n"
+    "<b>4️⃣ Takliflar, reyting va obunalar</b>\n"
+    "• «📥 Takliflar va bitimlar» — kelgan/ketgan takliflarni qabul qilish yoki "
+    "rad etish va bitim holatini kuzatish;\n"
+    "• Bitimni faqat <b>garant</b> orqali yakunlang — holat oʻzgarishini ikkala "
+    "tomon ham koʻradi;\n"
+    "• Bitimdan keyin eʼlon kartochkasidagi «⭐️ Sharh qoldirish» tugmasi orqali "
+    "sotuvchiga 1–5 baho bering — reyting boshqa xaridorlarga yordam beradi;\n"
+    "• «🔔 Qidiruv obunasi» — kerakli narx/rank boʻyicha yangi eʼlon chiqsa, "
+    "bot sizga oʻzi xabar beradi;\n"
+    "• «🎁 Referal» — doʻstlarni taklif qilib bepul VIP eʼlon oling.\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "🛡️ Shubhali foydalanuvchini «🛡️ Firibgarni tekshirish» boʻlimida tekshiring."
 )
@@ -193,7 +208,39 @@ def status_label(status: str) -> str:
         "sold": "🔴 Sotilgan",
         "found": "✅ Topilgan",
         "rejected": "🚫 Rad etilgan",
+        "expired": "⌛️ Muddati tugagan",
     }.get(status or "", "❔ Nomaʼlum")
+
+
+def stars(score: float) -> str:
+    """O'rtacha bahoni yulduzchalarga aylantiradi (masalan 4.3 → ★★★★☆)."""
+    rounded = max(0, min(5, int(round(float(score or 0)))))
+    return "★" * rounded + "☆" * (5 - rounded)
+
+
+def format_rating(score: float, count: int) -> str:
+    """Reytingni matn ko'rinishida chiqaradi."""
+    if not count:
+        return "yangi sotuvchi"
+    return f"{float(score):.1f} {stars(score)} ({count} ta sharh)"
+
+
+def format_expiry(listing: dict[str, Any]) -> str:
+    """E'lonning amal muddati (mahalliy vaqtda, KK.OO)."""
+    expires = parse_dt(listing.get("expires_at"))
+    if expires is None:
+        return ""
+    local = expires.astimezone(
+        _tz_offset(config.TZ_OFFSET_HOURS)
+    )
+    return local.strftime("%d.%m.%Y")
+
+
+def _tz_offset(hours: int):
+    """Soat siljishi uchun timezone obyekti."""
+    from datetime import timedelta, timezone as _timezone
+
+    return _timezone(timedelta(hours=int(hours)))
 
 
 def _hashtag(text: str) -> str:
@@ -250,8 +297,13 @@ def format_listing_caption(
     listing: dict[str, Any],
     header: Optional[str] = None,
     seller_label: Optional[str] = None,
+    seller_rating: Optional[tuple[float, int]] = None,
 ) -> str:
-    """E'lon kartochkasi matnini tayyorlaydi."""
+    """E'lon kartochkasi matnini tayyorlaydi.
+
+    :param seller_rating: `(o'rtacha baho, sharhlar soni)` — berilmasa
+        reyting qatori ko'rsatilmaydi.
+    """
     listing_type = listing.get("listing_type", "sell")
     is_buy = listing_type == "buy"
     trade = is_trade(listing)
@@ -289,12 +341,25 @@ def format_listing_caption(
         else:
             role = "Sotuvchi"
         lines.append(f"👤 {role}: {esc(seller_label)}")
+    if seller_rating is not None and not is_buy:
+        score, count = seller_rating
+        if count:
+            lines.append(f"⭐️ Reyting: <b>{esc(format_rating(score, count))}</b>")
+        else:
+            lines.append("⭐️ Reyting: yangi sotuvchi")
     if listing.get("contact"):
         lines.append(f"🔗 Aloqa: {esc(listing['contact'])}")
+
+    expires_text = format_expiry(listing)
+    if expires_text and listing.get("status") in ("active", "expired"):
+        lines.append(f"⏳ Amal muddati: <b>{esc(expires_text)}</b> gacha")
 
     if listing.get("status") in ("sold", "found"):
         lines.append("")
         lines.append("🚫 <b>Bu eʼlon allaqachon yopilgan.</b>")
+    elif listing.get("status") == "expired":
+        lines.append("")
+        lines.append("⌛️ <b>Bu eʼlonning amal muddati tugagan.</b>")
 
     tags = build_hashtags(listing)
     if tags:
@@ -357,6 +422,45 @@ async def seller_label_of(listing: dict[str, Any]) -> str:
     return f"ID: {listing['user_id']}"
 
 
+async def seller_card_rating(listing: dict[str, Any]) -> Optional[tuple[float, int]]:
+    """E'lon egasining reytingi (kartochkada ko'rsatish uchun)."""
+    if listing.get("listing_type") == "buy":
+        return None
+    return await db.get_seller_rating(int(listing["user_id"]))
+
+
+def start_payload(message: Message) -> str:
+    """/start buyrug'idan keyingi parametrni qaytaradi (masalan `ref_123`)."""
+    parts = (message.text or "").split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+async def blacklist_warning(
+    user_id: int,
+    username: Optional[str] = None,
+    contact: str = "",
+) -> Optional[str]:
+    """Foydalanuvchi/aloqa qora ro'yxatda bo'lsa ogohlantirish matnini qaytaradi."""
+    candidates = [str(user_id)]
+    if username:
+        candidates.append(str(username))
+    clean = db.normalize_identifier(contact or "")
+    if clean:
+        candidates.append(clean)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        record = await db.is_blacklisted(candidate)
+        if record is not None:
+            return (
+                "⚠️ <b>Diqqat — qora roʻyxat!</b>\n\n"
+                f"🔎 Topilgan moslik: <code>{esc(candidate)}</code>\n"
+                f"📝 Sabab: {esc(record.get('reason') or 'koʻrsatilmagan')}"
+            )
+    return None
+
+
 async def send_listing_card(
     bot: Bot,
     chat_id: int | str,
@@ -364,10 +468,13 @@ async def send_listing_card(
     markup: Any = None,
     header: Optional[str] = None,
     seller_label: Optional[str] = None,
+    seller_rating: Optional[tuple[float, int]] = None,
 ) -> Optional[Message]:
     """E'lonni rasm(lar) va izoh bilan yuboradi. Asosiy xabarni qaytaradi."""
     photos: list[str] = list(listing.get("photos") or [])
-    caption = format_listing_caption(listing, header=header, seller_label=seller_label)
+    caption = format_listing_caption(
+        listing, header=header, seller_label=seller_label, seller_rating=seller_rating
+    )
 
     if not photos:
         return await bot.send_message(
@@ -408,10 +515,13 @@ async def edit_listing_card(
     markup: Any = None,
     header: Optional[str] = None,
     seller_label: Optional[str] = None,
+    seller_rating: Optional[tuple[float, int]] = None,
 ) -> bool:
     """Kanalga joylangan e'lon kartochkasini tahrirlaydi."""
     photos: list[str] = list(listing.get("photos") or [])
-    text = format_listing_caption(listing, header=header, seller_label=seller_label)
+    text = format_listing_caption(
+        listing, header=header, seller_label=seller_label, seller_rating=seller_rating
+    )
 
     try:
         if photos:
@@ -508,7 +618,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
     if user is None:
         return
 
-    await db.add_user(user.id, user.username, user.full_name)
+    is_new = await db.add_user(user.id, user.username, user.full_name)
     record = await db.get_user(user.id)
 
     if record and record.get("is_banned"):
@@ -530,7 +640,56 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
             reply_markup=main_menu_kb(),
         )
 
+    await handle_referral_start(message, bot, is_new)
     await send_shared_listing(message, bot)
+
+
+async def handle_referral_start(message: Message, bot: Bot, is_new: bool) -> None:
+    """/start ref_{id} havolasi orqali kelgan foydalanuvchini qayd etadi."""
+    user = message.from_user
+    if user is None:
+        return
+
+    payload = start_payload(message)
+    if not payload.startswith("ref_"):
+        return
+
+    raw_id = payload.split("_", 1)[-1]
+    if not raw_id.isdigit():
+        return
+
+    referrer_id = int(raw_id)
+    if referrer_id == user.id:
+        return
+
+    # Taklif qiluvchi haqiqiy foydalanuvchi bo'lishi shart
+    if await db.get_user(referrer_id) is None:
+        return
+
+    if not await db.set_referrer(user.id, referrer_id):
+        return
+
+    if config.REFERRAL_REWARD_VIP > 0 and is_new:
+        await db.add_free_vip(referrer_id, config.REFERRAL_REWARD_VIP)
+
+    total = await db.count_referrals(referrer_id)
+    nickname = esc(user.full_name or user.first_name or "Yangi doʻst")
+    reward_line = (
+        f"\n🎁 Sizga <b>{config.REFERRAL_REWARD_VIP}</b> ta bepul VIP eʼlon qoʻshildi!"
+        if config.REFERRAL_REWARD_VIP > 0 and is_new
+        else ""
+    )
+    try:
+        await bot.send_message(
+            referrer_id,
+            "🎉 <b>Yangi doʻstingiz qoʻshildi!</b>\n\n"
+            f"👤 {nickname} sizning havolangiz orqali botga kirdi.\n"
+            f"📈 Jami taklif qilganlaringiz: <b>{total}</b>"
+            f"{reward_line}",
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Referal xabari yuborilmadi (user=%s): %s", referrer_id, exc)
 
 
 async def send_shared_listing(message: Message, bot: Bot) -> None:
@@ -561,6 +720,7 @@ async def send_shared_listing(message: Message, bot: Bot) -> None:
             listing,
             markup=markup,
             seller_label=await seller_label_of(listing),
+            seller_rating=await seller_card_rating(listing),
         )
     except TelegramAPIError as exc:
         logger.warning("Ulashilgan eʼlon #%s yuborilmadi: %s", raw_id, exc)
@@ -576,6 +736,10 @@ async def cmd_help(message: Message) -> None:
             "• Eʼloningiz moderator tekshiruvidan soʻng kanalga chiqadi.\n"
             "• Xarid qilishda xavfsizlik uchun «🛡️ Garant xizmati»dan foydalaning.\n"
             "• Savol boʻlsa administrator bilan bogʻlaning.\n\n"
+            "Yangi boʻlimlar:\n"
+            "📥 Takliflar va bitimlar — kelgan takliflarga javob berish\n"
+            "🔔 Qidiruv obunasi — mos eʼlon chiqsa xabar beradi\n"
+            "🎁 Referal — doʻstlarni taklif qilib VIP olish\n\n"
             "Buyruqlar:\n"
             "/start — asosiy menyu\n"
             "/cancel — joriy amalni bekor qilish\n"
@@ -674,6 +838,35 @@ async def show_guide(message: Message) -> None:
             GUIDE_TEXT,
             reply_markup=guide_kb(),
             disable_web_page_preview=True,
+        )
+
+
+@router.message(StateFilter(None), F.text == BTN_REFERRAL)
+async def show_referral(message: Message) -> None:
+    """«🎁 Referal» — taklif havolasi va bonuslar."""
+    user = message.from_user
+    if user is None:
+        return
+
+    count = await db.count_referrals(user.id)
+    credits = await db.get_free_vip(user.id)
+    link = referral_link(user.id) or "havola mavjud emas"
+
+    text = (
+        "🎁 <b>Referal dasturi</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Doʻstlaringizni botga taklif qiling va <b>bepul VIP eʼlon</b> oling!\n\n"
+        f"🔗 Sizning havolangiz:\n<code>{esc(link)}</code>\n\n"
+        f"👥 Siz taklif qilgan doʻstlar: <b>{count}</b>\n"
+        f"💎 Bepul VIP eʼlonlar: <b>{credits}</b>\n"
+        f"🎯 Har bir yangi doʻst uchun: <b>+{config.REFERRAL_REWARD_VIP} VIP</b>\n\n"
+        "ℹ️ VIP eʼlon roʻyxatda yuqorida turadi. Kredit keyingi eʼlon "
+        "joylashtirishda avtomatik taklif qilinadi."
+    )
+
+    with permanent():
+        await message.answer(
+            text, reply_markup=referral_kb(user.id), disable_web_page_preview=True
         )
 
 

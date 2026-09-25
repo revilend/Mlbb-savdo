@@ -107,6 +107,25 @@ MAX_DESCRIPTION_LENGTH: int = 300
 BUMP_COOLDOWN_HOURS: int = 24
 MIN_PRICE: int = 1_000
 MAX_PRICE: int = 100_000_000_000
+# E'lonning amal qilish muddati (kun). Muddati o'tgan e'lon arxivga tushadi
+# va egasi «🔄 Yangilash» tugmasi orqali uni qayta tiklay oladi.
+LISTING_TTL_DAYS: int = max(1, _env_int("LISTING_TTL_DAYS", 14))
+# O'xshash e'lonlar qidiruvida narx farqi (±foiz)
+SIMILAR_PRICE_TOLERANCE: float = max(0.05, _env_float("SIMILAR_PRICE_TOLERANCE", 0.3))
+# Referal: har bir taklif qilingan do'st uchun beriladigan bepul VIP e'lonlar
+REFERRAL_REWARD_VIP: int = max(0, _env_int("REFERRAL_REWARD_VIP", 1))
+
+# --- Kunning tanlovi posti ---------------------------------------------------
+# Kanalga har kuni tanlangan (VIP/tasodifiy) e'lonni chiqaradigan post.
+FEATURED_ENABLED: bool = _env_bool("FEATURED_ENABLED", True)
+FEATURED_HOUR: int = min(23, max(0, _env_int("FEATURED_HOUR", 12)))
+FEATURED_MINUTE: int = min(59, max(0, _env_int("FEATURED_MINUTE", 0)))
+
+# --- Zaxira nusxa (backup) ---------------------------------------------------
+BACKUP_ENABLED: bool = _env_bool("BACKUP_ENABLED", True)
+BACKUP_DIR: str = _env_str("BACKUP_DIR", "backups") or "backups"
+BACKUP_HOUR: int = min(23, max(0, _env_int("BACKUP_HOUR", 3)))
+BACKUP_KEEP: int = max(1, _env_int("BACKUP_KEEP", 7))
 
 # --- Anti-flood (spam himoyasi) ---------------------------------------------
 # Sukut bo'yicha "yumshatilgan" rejim: oddiy foydalanuvchi sezmaydi, lekin

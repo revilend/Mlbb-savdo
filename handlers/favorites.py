@@ -10,7 +10,7 @@ from aiogram.filters import StateFilter
 from aiogram.types import CallbackQuery, Message
 
 from database import db
-from handlers.common import send_listing_card, seller_label_of
+from handlers.common import send_listing_card, seller_card_rating, seller_label_of
 from keyboards import BTN_FAVORITES, listing_action_kb
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ async def show_favorites(message: Message, bot: Bot) -> None:
                 listing,
                 markup=listing_action_kb(listing),
                 seller_label=await seller_label_of(listing),
+                seller_rating=await seller_card_rating(listing),
             )
             shown += 1
         except TelegramAPIError as exc:

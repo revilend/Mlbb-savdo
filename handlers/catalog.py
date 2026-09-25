@@ -9,7 +9,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from database import db
 from handlers.common import (
@@ -19,6 +19,7 @@ from handlers.common import (
     is_trade,
     notify_admin,
     send_listing_card,
+    seller_card_rating,
     seller_label_of,
     user_label,
     user_link,
@@ -27,6 +28,7 @@ from keyboards import (
     BTN_PRICE_FILTER,
     BTN_RANDOM,
     deal_admin_kb,
+    deal_status_kb,
     listing_action_kb,
     price_filter_kb,
 )
@@ -66,6 +68,7 @@ async def _send_listings(
                 markup=listing_action_kb(listing),
                 header=header if sent == 0 else None,
                 seller_label=await seller_label_of(listing),
+                seller_rating=await seller_card_rating(listing),
             )
             sent += 1
         except TelegramAPIError as exc:
@@ -91,7 +94,38 @@ async def random_listing(message: Message, bot: Bot) -> None:
         markup=listing_action_kb(listing),
         header=f"🎲 <b>Tasodifiy akkaunt</b>\n{default_header(listing)}",
         seller_label=await seller_label_of(listing),
+        seller_rating=await seller_card_rating(listing),
     )
+
+
+@router.callback_query(F.data.startswith("sim_"))
+async def similar_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """«🔎 O'xshash e'lonlar» tugmasi."""
+    raw_id = (callback.data or "").split("_", 1)[-1]
+    if not raw_id.isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    listing_id = int(raw_id)
+    listing = await db.get_listing(listing_id)
+    if listing is None:
+        await callback.answer("❌ Eʼlon topilmadi.", show_alert=True)
+        return
+
+    similar = await db.get_similar_listings(listing_id, limit=MAX_RESULTS)
+    if not similar:
+        await callback.answer(
+            "😔 Hozircha oʻxshash eʼlon topilmadi.", show_alert=True
+        )
+        return
+
+    await callback.answer(f"🔎 {len(similar)} ta oʻxshash eʼlon topildi.")
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"🔎 <b>Oʻxshash eʼlonlar</b> — #{listing_id} asosida "
+            f"{len(similar)} ta topildi 👇"
+        )
+        await _send_listings(bot, callback.message.chat.id, similar)
 
 
 @router.message(StateFilter(None), F.text == BTN_PRICE_FILTER)
@@ -166,9 +200,17 @@ async def deal_cb(callback: CallbackQuery, bot: Bot) -> None:
             + esc(listing.get("price_display") or format_price(listing.get("price_numeric")))
         )
 
+    # Bitimni bazada qayd etamiz — holatini kuzatish uchun
+    deal_id = await db.create_deal(
+        listing_id=listing_id,
+        seller_id=int(listing["user_id"]),
+        buyer_id=user.id,
+        amount=listing.get("price_numeric"),
+    )
+
     admin_text = (
         "🛡️ <b>Admin orqali bitim soʻrovi!</b>\n\n"
-        f"🆔 Eʼlon: <b>#{listing_id}</b>\n"
+        f"🆔 Eʼlon: <b>#{listing_id}</b> · Bitim: <b>#{deal_id}</b>\n"
         f"📌 Turi: {kind_line}\n"
         f"🏆 Rank: {esc(listing.get('rank_info') or '—')}\n"
         f"{demand_line}\n\n"
@@ -179,11 +221,16 @@ async def deal_cb(callback: CallbackQuery, bot: Bot) -> None:
         f"🔗 Aloqa: {esc(listing.get('contact') or '—')}"
     )
 
-    markup = deal_admin_kb(
-        buyer_id=user.id,
-        seller_id=int(listing["user_id"]),
-        username_buyer=user.username,
-        username_seller=(seller or {}).get("username"),
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=(
+            deal_admin_kb(
+                buyer_id=user.id,
+                seller_id=int(listing["user_id"]),
+                username_buyer=user.username,
+                username_seller=(seller or {}).get("username"),
+            ).inline_keyboard
+            + deal_status_kb(deal_id).inline_keyboard
+        )
     )
 
     await notify_admin(bot, admin_text, markup=markup)
@@ -196,9 +243,11 @@ async def deal_cb(callback: CallbackQuery, bot: Bot) -> None:
         try:
             await callback.message.reply(
                 "🛡️ <b>Bitim soʻrovingiz qabul qilindi!</b>\n\n"
+                f"🆔 Bitim raqami: <b>#{deal_id}</b>\n\n"
                 "Administrator tez orada siz bilan bogʻlanadi. "
                 "Iltimos, toʻlovni faqat garant orqali amalga oshiring — "
-                "bu sizni firibgarlikdan himoya qiladi."
+                "bu sizni firibgarlikdan himoya qiladi.\n\n"
+                "Bitim holatini «📥 Takliflar va bitimlar» boʻlimida kuzatishingiz mumkin."
             )
         except TelegramAPIError:
             pass

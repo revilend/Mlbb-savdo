@@ -29,15 +29,37 @@ class SearchFSM(StatesGroup):
 
 
 class OfferFSM(StatesGroup):
-    """Sotuvchiga narx taklif qilish."""
+    """Sotuvchiga narx taklif qilish va javob yozish."""
 
     waiting_amount = State()
+    waiting_reply = State()
 
 
 class PriceDropFSM(StatesGroup):
     """E'lon narxini tushirish (chegirma)."""
 
     waiting_new_price = State()
+
+
+class EditFSM(StatesGroup):
+    """E'lonni tahrirlash (narx, izoh, aloqa)."""
+
+    waiting_price = State()
+    waiting_description = State()
+    waiting_contact = State()
+
+
+class ReviewFSM(StatesGroup):
+    """Sotuvchi haqida sharh qoldirish."""
+
+    rating = State()
+    comment = State()
+
+
+class SavedSearchFSM(StatesGroup):
+    """Saqlangan qidiruv (obuna) yaratish."""
+
+    waiting_keyword = State()
 
 
 class CalcFSM(StatesGroup):

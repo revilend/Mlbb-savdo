@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 from database import db
 from handlers.common import (
+    blacklist_warning,
     menu_button_guard,
     notify_admin,
     parse_price,
@@ -206,5 +207,16 @@ async def search_contact(message: Message, state: FSMContext, bot: Bot) -> None:
         await notify_admin(
             bot,
             f"⚠️ #{listing_id} soʻrovini yuborishda xatolik yuz berdi.",
+            markup=moderation_kb(listing_id),
+        )
+
+    # Avtomatik firibgarlik tekshiruvi (aloqa/username qora ro'yxatda bo'lsa)
+    warning = await blacklist_warning(user.id, user.username, contact)
+    if warning:
+        await notify_admin(
+            bot,
+            f"🚨 <b>Soʻrov #{listing_id} — shubhali foydalanuvchi!</b>\n\n"
+            f"{warning}\n\n"
+            "Iltimos, soʻrovni chiqarishdan oldin tekshirib koʻring.",
             markup=moderation_kb(listing_id),
         )

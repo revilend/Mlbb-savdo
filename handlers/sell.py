@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message
 import config
 from database import db
 from handlers.common import (
+    blacklist_warning,
     default_header,
     esc,
     format_price,
@@ -247,7 +248,8 @@ async def sell_trade_wanted(message: Message, state: FSMContext) -> None:
 
     await state.update_data(trade_wanted=wanted[:200], price_numeric=None, price_display="")
     await state.set_state(SellFSM.is_vip)
-    await message.answer(VIP_ASK, reply_markup=vip_kb("vip"))
+    credits = await db.get_free_vip(message.from_user.id) if message.from_user else 0
+    await message.answer(VIP_ASK, reply_markup=vip_kb("vip", credits))
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +285,8 @@ async def sell_price(message: Message, state: FSMContext) -> None:
 
     await state.update_data(price_numeric=price, price_display=format_price(price))
     await state.set_state(SellFSM.is_vip)
-    await message.answer(VIP_ASK, reply_markup=vip_kb("vip"))
+    credits = await db.get_free_vip(message.from_user.id) if message.from_user else 0
+    await message.answer(VIP_ASK, reply_markup=vip_kb("vip", credits))
 
 
 # ---------------------------------------------------------------------------
@@ -291,10 +294,24 @@ async def sell_price(message: Message, state: FSMContext) -> None:
 # ---------------------------------------------------------------------------
 @router.callback_query(SellFSM.is_vip, F.data.startswith("vip_"))
 async def sell_vip(callback: CallbackQuery, state: FSMContext) -> None:
-    """VIP tanlovi."""
-    is_vip = 1 if (callback.data or "").endswith("_yes") else 0
+    """VIP tanlovi (bepul kredit bilan ham)."""
+    suffix = (callback.data or "").split("_", 1)[-1]
+
+    if suffix == "free":
+        consumed = await db.consume_free_vip(callback.from_user.id)
+        is_vip = 1 if consumed else 0
+        remaining = await db.get_free_vip(callback.from_user.id)
+        await callback.answer(
+            f"🎁 Bepul VIP ishlatildi (qoldi: {remaining})"
+            if consumed
+            else "⚠️ Bepul VIP topilmadi",
+            show_alert=not consumed,
+        )
+    else:
+        is_vip = 1 if suffix == "yes" else 0
+        await callback.answer("💎 VIP yoqildi" if is_vip else "🙂 Yaxshi")
+
     await state.update_data(is_vip=is_vip)
-    await callback.answer("💎 VIP yoqildi" if is_vip else "🙂 Yaxshi")
 
     if isinstance(callback.message, Message):
         try:
@@ -466,6 +483,19 @@ async def sell_finish(message: Message, state: FSMContext, bot: Bot) -> None:
         await notify_admin(
             bot,
             f"⚠️ #{listing_id} eʼlonini yuborishda xatolik: {esc(last_error)}",
+            markup=moderation_kb(listing_id),
+        )
+
+    # Avtomatik firibgarlik tekshiruvi: aloqa/username qora ro'yxatda bo'lsa
+    warning = await blacklist_warning(
+        user.id, user.username, str(data.get("contact") or "")
+    )
+    if warning:
+        await notify_admin(
+            bot,
+            f"🚨 <b>Eʼlon #{listing_id} — shubhali sotuvchi!</b>\n\n"
+            f"{warning}\n\n"
+            "Iltimos, eʼlonni chiqarishdan oldin tekshirib koʻring.",
             markup=moderation_kb(listing_id),
         )
 

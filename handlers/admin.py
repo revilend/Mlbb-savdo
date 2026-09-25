@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 import config
 from database import db
@@ -35,11 +37,13 @@ from keyboards import (
     admins_kb,
     cancel_kb,
     channels_kb,
+    deal_status_kb,
     dm_user_kb,
     listing_action_kb,
     main_menu_kb,
     single_button_kb,
 )
+from handlers.subscriptions import notify_subscribers
 from states import AdminFSM
 
 logger = logging.getLogger(__name__)
@@ -145,9 +149,17 @@ async def approve_listing(bot: Bot, listing_id: int) -> tuple[bool, str]:
         return False, f"Kanalga joylashda xatolik: {esc(str(exc))}"
 
     await db.update_listing_status(listing_id, "active")
+    await db.touch_listing_expiry(listing_id)
     if message is not None:
         await db.set_channel_message_id(listing_id, message.message_id)
     await db.update_bump_time(listing_id)
+
+    # Obuna bo'lganlarga mos e'lon haqida xabar beramiz
+    active = await db.get_listing(listing_id) or listing
+    try:
+        await notify_subscribers(bot, active)
+    except Exception as exc:  # obuna xatosi e'lonni tasdiqlashga xalaqit bermasin
+        logger.warning("Obunachilarga xabar yuborilmadi (#%s): %s", listing_id, exc)
 
     owner = await db.get_user(int(listing["user_id"]))
     owner_name = user_label(
@@ -276,10 +288,16 @@ async def adm_stats(callback: CallbackQuery) -> None:
         f"📋 Jami eʼlonlar: <b>{stats['listings']}</b>\n"
         f"⏳ Moderatsiya kutayotgan: <b>{stats['pending']}</b>\n"
         f"🟢 Aktiv: <b>{stats['active']}</b>\n"
+        f"⌛️ Muddati tugagan: <b>{stats.get('expired', 0)}</b>\n"
         f"🔴 Sotilgan: <b>{stats['sold']}</b>\n"
         f"🚫 Rad etilgan: <b>{stats['rejected']}</b>\n"
         f"🛒 Xaridor soʻrovlari: <b>{stats['buy_requests']}</b>\n"
         f"⭐️ Sevimlilarga qoʻshilganlar: <b>{stats['favorites']}</b>\n"
+        f"📝 Sharhlar: <b>{stats.get('reviews', 0)}</b>\n"
+        f"💬 Takliflar: <b>{stats.get('offers', 0)}</b> "
+        f"(kutilmoqda: {stats.get('pending_offers', 0)})\n"
+        f"🤝 Bitimlar: <b>{stats.get('deals', 0)}</b> "
+        f"(faol: {stats.get('open_deals', 0)})\n"
         f"🚫 Qora roʻyxat: <b>{stats['blacklist']}</b>"
     )
 
@@ -322,6 +340,156 @@ async def adm_today(callback: CallbackQuery) -> None:
             await callback.message.answer(
                 text, reply_markup=single_button_kb("⬅️ Orqaga", "adm_back")
             )
+
+
+@router.callback_query(F.data == "adm_analytics")
+async def adm_analytics(callback: CallbackQuery) -> None:
+    """Oxirgi 7 kunlik faollik va eng faol sotuvchilar."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    days = await db.get_daily_activity(7)
+    top_sellers = await db.get_top_sellers(30, 5)
+
+    totals = {
+        "users": sum(day["users"] for day in days),
+        "listings": sum(day["listings"] for day in days),
+        "sold": sum(day["sold"] for day in days),
+    }
+    peak = max((day["listings"] for day in days), default=0)
+
+    lines = [
+        "📈 <b>Analitika — oxirgi 7 kun</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 Yangi aʼzolar: <b>+{totals['users']}</b>",
+        f"📝 Yangi eʼlonlar: <b>{totals['listings']}</b>",
+        f"✅ Sotilganlar: <b>{totals['sold']}</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for day in days:
+        bar = "▓" * (min(10, round(day["listings"] / peak * 10)) if peak else 0)
+        lines.append(
+            f"<code>{day['date']}</code>  "
+            f"👥{day['users']:<3} 📝{day['listings']:<3} ✅{day['sold']:<3} {bar}"
+        )
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    if top_sellers:
+        lines.append("🏆 <b>Eng faol sotuvchilar (30 kun)</b>")
+        for index, seller in enumerate(top_sellers, start=1):
+            user = await db.get_user(int(seller["user_id"]))
+            label = user_label(
+                int(seller["user_id"]),
+                (user or {}).get("username"),
+                (user or {}).get("full_name"),
+            )
+            lines.append(f"{index}. {esc(label)} — <b>{seller['count']}</b> ta")
+    else:
+        lines.append("🏆 Hozircha sotuv statistikasi yoʻq.")
+
+    text = "\n".join(lines)
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=single_button_kb("⬅️ Orqaga", "adm_back")
+            )
+        except TelegramAPIError:
+            await callback.message.answer(
+                text, reply_markup=single_button_kb("⬅️ Orqaga", "adm_back")
+            )
+
+
+@router.callback_query(F.data == "adm_backup")
+async def adm_backup(callback: CallbackQuery, bot: Bot) -> None:
+    """Bazaning zaxira nusxasini yaratib, adminga yuboradi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await callback.answer("💾 Nusxa tayyorlanmoqda…")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    dest = os.path.join(config.BACKUP_DIR, f"market_backup_{stamp}.sqlite3")
+
+    ok = await db.backup_to(dest)
+    if not ok:
+        if isinstance(callback.message, Message):
+            await callback.message.answer("⚠️ Zaxira nusxasini yaratib boʻlmadi.")
+        return
+
+    size_kb = max(1, os.path.getsize(dest) // 1024) if os.path.exists(dest) else 0
+    try:
+        await bot.send_document(
+            callback.from_user.id,
+            FSInputFile(dest),
+            caption=(
+                "💾 <b>Zaxira nusxa tayyor</b>\n\n"
+                f"📅 {esc(stamp)}\n"
+                f"📦 Hajmi: <b>{size_kb} KB</b>"
+            ),
+        )
+    except TelegramAPIError as exc:
+        logger.error("Zaxira nusxasini yuborib boʻlmadi: %s", exc)
+        if isinstance(callback.message, Message):
+            await callback.message.answer(f"❌ Faylni yuborib boʻlmadi: {esc(exc)}")
+
+
+@router.callback_query(F.data.startswith("dstat_"))
+async def deal_status_cb(callback: CallbackQuery, bot: Bot) -> None:
+    """Admin bitim holatini o'zgartiradi (garant/yakunlandi/bekor)."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    parts = (callback.data or "").split("_", 2)
+    if len(parts) < 3:
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    deal_id_raw, status = parts[1], parts[2]
+    if not deal_id_raw.isdigit() or status not in ("garant", "done", "cancelled"):
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    deal = await db.update_deal_status(int(deal_id_raw), status)
+    if deal is None:
+        await callback.answer("❌ Bitim topilmadi.", show_alert=True)
+        return
+
+    labels = {
+        "garant": "🛡️ Bitim garant jarayoniga oʻtdi",
+        "done": "✅ Bitim yakunlandi",
+        "cancelled": "❌ Bitim bekor qilindi",
+    }
+    await callback.answer("Holat yangilandi.")
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_reply_markup(reply_markup=deal_status_kb(int(deal_id_raw)))
+        except TelegramAPIError:
+            pass
+        await callback.message.answer(
+            f"{labels[status]}.\n\n🆔 Bitim: <b>#{deal_id_raw}</b>"
+        )
+
+    await _notify_deal_parties(bot, deal, labels[status])
+
+
+async def _notify_deal_parties(bot: Bot, deal: dict, title: str) -> None:
+    """Bitim ishtirokchilariga holat o'zgarishini bildiradi."""
+    for user_id in {int(deal["seller_id"]), int(deal["buyer_id"])}:
+        try:
+            await bot.send_message(
+                user_id,
+                f"{title}\n\n"
+                f"🆔 Bitim: <b>#{deal['id']}</b>\n"
+                f"📋 Eʼlon: <b>#{deal['listing_id']}</b>\n\n"
+                "Holatni «📥 Takliflar va bitimlar» boʻlimida koʻrishingiz mumkin.",
+                disable_web_page_preview=True,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Bitim xabari yuborilmadi (user=%s): %s", user_id, exc)
 
 
 @router.callback_query(F.data == "adm_broadcast")

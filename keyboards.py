@@ -67,6 +67,9 @@ BTN_FAVORITES = "⭐️ Sevimlilarim"
 BTN_CALC = "🧮 Narx kalkulyatori"
 BTN_SCAM = "🛡️ Firibgarni tekshirish"
 BTN_MY_LISTINGS = "📋 Mening eʼlonlarim"
+BTN_INBOX = "📥 Takliflar va bitimlar"
+BTN_SAVED_SEARCH = "🔔 Qidiruv obunasi"
+BTN_REFERRAL = "🎁 Referal"
 BTN_GARANT = "🛡️ Garant xizmati"
 BTN_STATS = "📊 Statistika"
 BTN_GUIDE = "❓ Qoʻllanma"
@@ -79,8 +82,9 @@ MAIN_MENU_ROWS: list[list[str]] = [
     [BTN_RANDOM, BTN_PRICE_FILTER],
     [BTN_FAVORITES, BTN_CALC],
     [BTN_SCAM, BTN_MY_LISTINGS],
-    [BTN_GARANT, BTN_STATS],
-    [BTN_GUIDE],
+    [BTN_INBOX, BTN_SAVED_SEARCH],
+    [BTN_REFERRAL, BTN_GARANT],
+    [BTN_STATS, BTN_GUIDE],
 ]
 
 ALL_MENU_BUTTONS: set[str] = {button for row in MAIN_MENU_ROWS for button in row}
@@ -118,6 +122,28 @@ def share_button(listing_id: int) -> InlineKeyboardButton:
     """«Do'stlarga ulashish» tugmasi."""
     return InlineKeyboardButton(
         text="↗️ Doʻstlarga ulashish", url=share_url(listing_id)
+    )
+
+
+def referral_link(user_id: int) -> str:
+    """Foydalanuvchining referal havolasi."""
+    return bot_deep_link(f"ref_{int(user_id)}")
+
+
+def referral_share_url(user_id: int) -> str:
+    """Referal havolasini do'stlarga ulashish uchun Telegram havolasi."""
+    text = "Mobile Legends akkaunt savdosi — MLBB Market botiga qoʻshiling!"
+    deep_link = referral_link(user_id)
+    encoded_text = quote(text, safe="!")
+    if deep_link:
+        return f"https://t.me/share/url?url={quote(deep_link, safe='')}&text={encoded_text}"
+    return f"https://t.me/share/url?text={encoded_text}"
+
+
+def referral_share_button(user_id: int) -> InlineKeyboardButton:
+    """Referal havolasini ulashish tugmasi."""
+    return InlineKeyboardButton(
+        text="↗️ Doʻstlarni taklif qilish", url=referral_share_url(user_id)
     )
 
 
@@ -208,8 +234,20 @@ def listing_action_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
                 url=contact_url(str(listing.get("contact") or "")),
             ),
         ],
-        [share_button(listing_id)],
     ]
+
+    extra: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(text="🔎 Oʻxshash eʼlonlar", callback_data=f"sim_{listing_id}")
+    ]
+    if listing_type != "buy":
+        extra.append(
+            InlineKeyboardButton(
+                text="⭐️ Sharh qoldirish", callback_data=f"rvw_{listing_id}"
+            )
+        )
+    rows.append(extra)
+    rows.append([share_button(listing_id)])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -240,18 +278,36 @@ def my_listing_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
         and bool(listing.get("price_numeric"))
     )
 
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="✅ Sotildi deb belgilash", callback_data=f"sold_{listing_id}")]
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if status == "expired":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Eʼlonni yangilash", callback_data=f"renew_{listing_id}"
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [InlineKeyboardButton(text="✅ Sotildi deb belgilash", callback_data=f"sold_{listing_id}")]
+        )
 
     if status == "active" and is_sell:
         rows.append(
             [InlineKeyboardButton(text="📉 Narxni tushirish", callback_data=f"drop_price_{listing_id}")]
         )
 
-    rows.append(
-        [InlineKeyboardButton(text="🔄 Eʼlonni koʻtarish (UP)", callback_data=f"bump_{listing_id}")]
-    )
+    if status in ("active", "pending"):
+        rows.append(
+            [InlineKeyboardButton(text="✏️ Tahrirlash", callback_data=f"edit_{listing_id}")]
+        )
+
+    if status == "active":
+        rows.append(
+            [InlineKeyboardButton(text="🔄 Eʼlonni koʻtarish (UP)", callback_data=f"bump_{listing_id}")]
+        )
+
     rows.append([share_button(listing_id)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -290,6 +346,10 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🚫 Qora roʻyxatga kiritish", callback_data="adm_ban"),
                 InlineKeyboardButton(text="📋 Qora roʻyxat", callback_data="adm_blacklist"),
+            ],
+            [
+                InlineKeyboardButton(text="📈 Analitika", callback_data="adm_analytics"),
+                InlineKeyboardButton(text="💾 Zaxira nusxa", callback_data="adm_backup"),
             ],
         ]
     )
@@ -342,16 +402,29 @@ def rank_kb(prefix: str = "srank") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def vip_kb(prefix: str = "vip") -> InlineKeyboardMarkup:
-    """VIP tanlash klaviaturasi."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def vip_kb(prefix: str = "vip", credits: int = 0) -> InlineKeyboardMarkup:
+    """VIP tanlash klaviaturasi.
+
+    :param credits: foydalanuvchidagi bepul VIP kreditlari soni. 0 dan katta
+        bo'lsa, bepul ishlatish tugmasi ham ko'rsatiladi.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if credits > 0:
+        rows.append(
             [
-                InlineKeyboardButton(text="💎 Ha, VIP qilib qoʻying", callback_data=f"{prefix}_yes"),
-                InlineKeyboardButton(text="🙂 Yoʻq", callback_data=f"{prefix}_no"),
+                InlineKeyboardButton(
+                    text=f"🎁 Bepul VIP ishlatish ({credits} ta)",
+                    callback_data=f"{prefix}_free",
+                )
             ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="💎 Ha, VIP qilib qoʻying", callback_data=f"{prefix}_yes"),
+            InlineKeyboardButton(text="🙂 Yoʻq", callback_data=f"{prefix}_no"),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def search_type_kb() -> InlineKeyboardMarkup:
@@ -442,4 +515,119 @@ def dm_user_kb(user_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="✉️ Xabar yuborish", callback_data=f"adm_dm_{user_id}")]
         ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Yangi bo'limlar uchun klaviaturalar
+# ---------------------------------------------------------------------------
+def offer_response_kb(offer_id: int) -> InlineKeyboardMarkup:
+    """Sotuvchi uchun taklifga javob berish tugmalari."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Qabul qilish", callback_data=f"off_ok_{offer_id}"),
+                InlineKeyboardButton(text="❌ Rad etish", callback_data=f"off_no_{offer_id}"),
+            ],
+            [InlineKeyboardButton(text="💬 Javob yozish", callback_data=f"off_msg_{offer_id}")],
+        ]
+    )
+
+
+def deal_status_kb(deal_id: int) -> InlineKeyboardMarkup:
+    """Admin uchun bitim holatini boshqarish tugmalari."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛡️ Garantga oʻtdi", callback_data=f"dstat_{deal_id}_garant"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Yakunlandi", callback_data=f"dstat_{deal_id}_done"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Bekor qilindi", callback_data=f"dstat_{deal_id}_cancelled"
+                ),
+            ],
+        ]
+    )
+
+
+def review_rating_kb() -> InlineKeyboardMarkup:
+    """Sharh uchun 1–5 baho tanlash."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"{score}⭐️", callback_data=f"rvwr_{score}")
+                for score in range(1, 6)
+            ]
+        ]
+    )
+
+
+def saved_price_kb() -> InlineKeyboardMarkup:
+    """Saqlangan qidiruv uchun narx oralig'ini tanlash."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 100k gacha", callback_data="saved_p_100"),
+                InlineKeyboardButton(text="🟡 100k – 400k", callback_data="saved_p_400"),
+                InlineKeyboardButton(text="🔴 400k+", callback_data="saved_p_max"),
+            ],
+            [InlineKeyboardButton(text="❔ Narx muhim emas", callback_data="saved_p_any")],
+        ]
+    )
+
+
+def saved_searches_kb(searches: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    """Saqlangan qidiruvlar ro'yxati (o'chirish tugmalari bilan)."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ Yangi obuna", callback_data="saved_new")]
+    ]
+    for search in searches:
+        label = saved_search_label(search)
+        rows.append(
+            [InlineKeyboardButton(text=f"🗑 {label}", callback_data=f"saved_del_{search['id']}")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def saved_search_label(search: dict[str, Any]) -> str:
+    """Saqlangan qidiruv uchun qisqa yorliq."""
+    low, high = search.get("min_price"), search.get("max_price")
+    if low is None and high is None:
+        price = "har qanday narx"
+    elif low is None:
+        price = f"{int(high):,}".replace(",", " ") + " gacha"
+    elif high is None:
+        price = f"{int(low):,}".replace(",", " ") + " dan"
+    else:
+        price = (
+            f"{int(low):,}".replace(",", " ")
+            + " – "
+            + f"{int(high):,}".replace(",", " ")
+        )
+    keyword = str(search.get("keyword") or "").strip()
+    return f"{price}" + (f" · {keyword}" if keyword else "")
+
+
+def edit_listing_kb(listing_id: int) -> InlineKeyboardMarkup:
+    """E'lonni tahrirlash maydonlarini tanlash."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💵 Narx", callback_data=f"editf_price_{listing_id}"),
+                InlineKeyboardButton(text="📝 Izoh", callback_data=f"editf_desc_{listing_id}"),
+            ],
+            [InlineKeyboardButton(text="🔗 Aloqa", callback_data=f"editf_contact_{listing_id}")],
+        ]
+    )
+
+
+def referral_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Referal bo'limi klaviaturasi."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[referral_share_button(user_id)]]
     )
