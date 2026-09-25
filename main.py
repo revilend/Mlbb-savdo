@@ -51,6 +51,7 @@ from settings import settings
 from middlewares import (
     SelfDestructMiddleware,
     UserMessageCleanerMiddleware,
+    LatestMenuMiddleware,
     build_anti_flood,
     messages as message_registry,
 )
@@ -140,7 +141,12 @@ def setup_protection_middlewares(
     else:
         logger.info("Anti-flood oʻchirilgan (FLOOD_PROTECTION=false).")
 
-    # --- 3. Foydalanuvchi xabarlarini tozalash (ixtiyoriy) -------------------
+    # --- 3. Menyudagi eski javobni almashtirish -----------------------------
+    if config.SELF_DESTRUCT_REPLACE_OLD:
+        dispatcher.message.outer_middleware(LatestMenuMiddleware())
+        logger.info("Shaxsiy chatda faqat eng soʻngi menyu javobi saqlanadi.")
+
+    # --- 4. Foydalanuvchi xabarlarini tozalash (ixtiyoriy) -------------------
     user_cleaner: Optional[UserMessageCleanerMiddleware] = None
     if config.SELF_DESTRUCT_ENABLED and config.SELF_DESTRUCT_USER_MESSAGES:
         user_cleaner = UserMessageCleanerMiddleware(

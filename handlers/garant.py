@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.types import Message
 
-from keyboards import BTN_GARANT, garant_kb
+from keyboards import BTN_GARANT, garant_kb, private_chat_kb
 from middlewares import permanent
 
 router = Router(name="garant")
@@ -43,6 +43,13 @@ GARANT_TEXT = (
 async def show_garant(message: Message) -> None:
     """Garant haqida ma'lumot beradi (xabar doimiy saqlanadi)."""
     with permanent():
+        if message.chat.type != "private":
+            await message.answer(
+                "🛡️ Garant xizmatini botning shaxsiy chatida oching 👇",
+                reply_markup=private_chat_kb("garant", "🔒 Shaxsiy chatda ochish"),
+                disable_web_page_preview=True,
+            )
+            return
         await message.answer(
             GARANT_TEXT, reply_markup=garant_kb(), disable_web_page_preview=True
         )

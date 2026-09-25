@@ -38,6 +38,7 @@ from aiogram import BaseMiddleware, Bot
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, TelegramObject
+from keyboards import ALL_MENU_BUTTONS
 from aiogram.methods import (
     CopyMessage,
     ForwardMessage,
@@ -61,6 +62,9 @@ from aiogram.methods import (
 import config
 
 logger = logging.getLogger(__name__)
+
+#: Menyudagi tugma bosilganda oldingi bot javobini tozalash belgisi.
+_replace_previous: ContextVar[bool] = ContextVar("replace_previous", default=False)
 
 #: Xabar qaytaradigan (va demak o'chirilishi mumkin bo'lgan) metodlar
 SEND_METHODS: tuple = (
@@ -119,6 +123,30 @@ def permanent() -> Iterator[None]:
         yield
     finally:
         _keep_forever.reset(token)
+
+
+@contextmanager
+def replace_previous() -> Iterator[None]:
+    """Keyingi javob yuborilishidan oldin eski bot xabarlarini tozalash."""
+    token = _replace_previous.set(True)
+    try:
+        yield
+    finally:
+        _replace_previous.reset(token)
+
+
+class LatestMenuMiddleware(BaseMiddleware):
+    """Menyu bosilganda javobdan oldin eski bot xabarini tozalaydi."""
+
+    async def __call__(self, handler: Any, event: TelegramObject, data: Dict[str, Any]) -> Any:
+        is_menu = isinstance(event, Message) and event.text in ALL_MENU_BUTTONS
+        is_start = isinstance(event, Message) and bool(
+            event.text and event.text.startswith("/start")
+        )
+        if not (is_menu or is_start):
+            return await handler(event, data)
+        with replace_previous():
+            return await handler(event, data)
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +242,25 @@ class SelfDestructMiddleware(BaseRequestMiddleware):
         if not self.enabled:
             return result
         try:
+            await self._replace_previous_bot_messages(bot, method)
             self._schedule(bot, method, result)
         except Exception:  # tozalash hech qachon asosiy oqimni buzmasligi kerak
             logger.exception("Self-destruct rejalashtirishda kutilmagan xatolik")
         return result
+
+    async def _replace_previous_bot_messages(self, bot: Bot, method: Any) -> None:
+        """Shaxsiy chatda menyu javobidan oldingi bot xabarlarini o'chiradi."""
+        if not _replace_previous.get() or not config.SELF_DESTRUCT_REPLACE_OLD:
+            return
+        chat_id = getattr(method, "chat_id", None)
+        if not isinstance(chat_id, int) or chat_id <= 0 or chat_id in self.skip_chat_ids:
+            return
+        if not isinstance(method, SEND_METHODS):
+            return
+        # Faqat handler ichidagi birinchi yuborishda eski xabarlarni tozalaymiz;
+        # aks holda ko'p qatorli javobning keyingi qismi ham o'sha zahoti o'chadi.
+        _replace_previous.set(False)
+        await sweep_chat(bot, chat_id, self.registry)
 
     def _schedule(self, bot: Bot, method: Any, result: Any) -> None:
         """Natijadagi xabarlarni ro'yxatga oladi va o'chirishni rejalashtiradi."""
@@ -439,12 +482,14 @@ def cleanup_registry(registry: Optional[MessageRegistry] = None) -> None:
 
 __all__ = [
     "MessageRegistry",
+    "LatestMenuMiddleware",
     "SelfDestructMiddleware",
     "UserMessageCleanerMiddleware",
     "delete_later",
     "delete_silently",
     "messages",
     "permanent",
+    "replace_previous",
     "sweep_chat",
     "temporary",
     "cleanup_registry",

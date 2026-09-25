@@ -166,6 +166,9 @@ SELF_DESTRUCT_DEFAULT_TTL: int = max(0, _env_int("SELF_DESTRUCT_DEFAULT_TTL", 30
 SELF_DESTRUCT_NOTICE_TTL: int = max(0, _env_int("SELF_DESTRUCT_NOTICE_TTL", 12))
 SELF_DESTRUCT_USER_MESSAGES: bool = _env_bool("SELF_DESTRUCT_USER_MESSAGES", False)
 SELF_DESTRUCT_USER_TTL: int = max(0, _env_int("SELF_DESTRUCT_USER_TTL", 600))
+# Shaxsiy chatda yangi javob yuborilganda eski bot xabarlari oʻchiriladi.
+# Bu Telegram'da eski xabar ustiga ochilib qolmasligini ta'minlaydi.
+SELF_DESTRUCT_REPLACE_OLD: bool = _env_bool("SELF_DESTRUCT_REPLACE_OLD", True)
 CLEANER_TRACK_LIMIT: int = max(5, _env_int("CLEANER_TRACK_LIMIT", 40))
 # Kanallar/guruhlar va administrator chati hech qachon tozalanmaydi
 SELF_DESTRUCT_SKIP_CHAT_IDS: list[int] = _env_int_list(

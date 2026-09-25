@@ -23,6 +23,7 @@ from database import db, parse_dt
 from middlewares import messages as message_registry
 from middlewares import permanent, sweep_chat, temporary
 from settings import settings
+from states import ScamCheckFSM
 from keyboards import (
     BTN_CANCEL,
     BTN_GUIDE,
@@ -631,6 +632,26 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
             UNSUB_TEXT.format(channel=esc(channel_name)),
             reply_markup=subscribe_kb(await get_required_channel_link()),
         )
+        return
+
+    payload = start_payload(message)
+    if payload == "garant":
+        from handlers.garant import GARANT_TEXT
+        from keyboards import garant_kb
+
+        with permanent():
+            await message.answer(
+                GARANT_TEXT,
+                reply_markup=garant_kb(),
+                disable_web_page_preview=True,
+            )
+        return
+    if payload == "scam":
+        from handlers.scam_check import ASK_TEXT
+        from keyboards import cancel_kb
+
+        await state.set_state(ScamCheckFSM.waiting_query)
+        await message.answer(ASK_TEXT, reply_markup=cancel_kb())
         return
 
     with permanent():

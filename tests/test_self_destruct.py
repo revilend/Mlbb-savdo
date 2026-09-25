@@ -37,10 +37,12 @@ from middlewares.self_destruct import (
     MessageRegistry,
     SelfDestructMiddleware,
     UserMessageCleanerMiddleware,
+    LatestMenuMiddleware,
     delete_later,
     delete_silently,
     messages as global_registry,
     permanent,
+    replace_previous,
     sweep_chat,
     temporary,
 )
@@ -469,6 +471,42 @@ async def test_delete_later_helper():
     await delete_later(bot, USER_ID, 99, 0)
 
     assert calls == [(USER_ID, 99)]
+
+
+async def test_latest_menu_middleware_cleans_previous_private_messages(bot, registry):
+    """Menyu tugmasi eski javobni o'chirib, yangisini qoldiradi."""
+    middleware = SelfDestructMiddleware(registry=registry)
+    calls: list[tuple[int, int]] = []
+
+    async def fake_delete(chat_id: int, message_id: int, **kwargs: Any) -> bool:
+        calls.append((chat_id, message_id))
+        return True
+
+    bot.delete_message = fake_delete  # type: ignore[method-assign]
+    registry.add(USER_ID, 10)
+    registry.add(USER_ID, 11)
+
+    with replace_previous():
+        await middleware._replace_previous_bot_messages(
+            bot, SendMessage(chat_id=USER_ID, text="javob")
+        )
+
+    assert calls == [(USER_ID, 10), (USER_ID, 11)]
+    assert registry.count(USER_ID) == 0
+    await middleware.shutdown()
+
+
+async def test_latest_menu_middleware_keeps_group_messages(bot, registry):
+    """Guruhdagi eski xabarlar tozalanmaydi."""
+    middleware = SelfDestructMiddleware(registry=registry)
+    registry.add(-100123, 10)
+
+    with replace_previous():
+        await middleware._replace_previous_bot_messages(
+            bot, SendMessage(chat_id=-100123, text="javob")
+        )
+
+    assert registry.count(-100123) == 1
 
 
 # ---------------------------------------------------------------------------

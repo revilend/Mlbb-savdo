@@ -597,6 +597,16 @@ def skip_kb(callback_data: str = "desc_skip", text: str = "⏭ Oʻtkazib yuboris
     return single_button_kb(text, callback_data)
 
 
+def private_chat_kb(payload: str, text: str = "🔒 Shaxsiy chatda ochish") -> InlineKeyboardMarkup:
+    """Botning shaxsiy chatini deep-link orqali ochish tugmasi."""
+    link = bot_deep_link(payload)
+    if not link:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text, url=link)]]
+    )
+
+
 def garant_kb() -> InlineKeyboardMarkup:
     """Garant xizmati klaviaturasi."""
     return InlineKeyboardMarkup(

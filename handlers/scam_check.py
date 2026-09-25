@@ -11,7 +11,7 @@ from aiogram.types import Message
 
 from database import db
 from handlers.common import esc, menu_button_guard
-from keyboards import BTN_SCAM, cancel_kb, garant_kb, main_menu_kb
+from keyboards import BTN_SCAM, cancel_kb, garant_kb, main_menu_kb, private_chat_kb
 from states import ScamCheckFSM
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,13 @@ SAFETY_TIPS = (
 @router.message(StateFilter(None), F.text == BTN_SCAM)
 async def scam_start(message: Message, state: FSMContext) -> None:
     """Tekshirish jarayonini boshlaydi."""
+    if message.chat.type != "private":
+        await message.answer(
+            "🛡️ Firibgarni tekshirish botning shaxsiy chatida ochiladi 👇",
+            reply_markup=private_chat_kb("scam", "🔒 Shaxsiy chatda ochish"),
+            disable_web_page_preview=True,
+        )
+        return
     await state.clear()
     await state.set_state(ScamCheckFSM.waiting_query)
     await message.answer(ASK_TEXT, reply_markup=cancel_kb())
