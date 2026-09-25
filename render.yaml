@@ -35,6 +35,8 @@ services:
         value: "false"
       - key: AI_API_KEY
         sync: false
+      - key: AI_PROVIDER
+        value: auto
       - key: AI_BASE_URL
         value: https://openrouter.ai/api/v1
       - key: AI_MODEL

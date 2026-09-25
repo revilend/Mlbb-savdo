@@ -56,6 +56,25 @@ class ReviewFSM(StatesGroup):
     comment = State()
 
 
+class BotRatingFSM(StatesGroup):
+    """Botga baho berish."""
+
+    rating = State()
+    comment = State()
+
+
+class CommentFSM(StatesGroup):
+    """E'longa izoh (komment) yozish."""
+
+    waiting_text = State()
+
+
+class ReportFSM(StatesGroup):
+    """Sotuvchini shikoyat qilish."""
+
+    waiting_details = State()
+
+
 class SavedSearchFSM(StatesGroup):
     """Saqlangan qidiruv (obuna) yaratish."""
 

@@ -123,6 +123,33 @@ CREATE TABLE IF NOT EXISTS blacklist (
     added_at   TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS bot_ratings (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL UNIQUE,
+    rating     INTEGER NOT NULL,
+    comment    TEXT,
+    created_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS listing_comments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    created_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER NOT NULL,
+    target_id   INTEGER NOT NULL,
+    listing_id  INTEGER,
+    reason      TEXT NOT NULL,
+    details     TEXT,
+    status      TEXT DEFAULT 'new',
+    created_at  TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_listings_status ON listings (status);
 CREATE INDEX IF NOT EXISTS idx_listings_user   ON listings (user_id);
 CREATE INDEX IF NOT EXISTS idx_favorites_user  ON favorites (user_id);
@@ -132,6 +159,8 @@ CREATE INDEX IF NOT EXISTS idx_offers_seller   ON offers (seller_id);
 CREATE INDEX IF NOT EXISTS idx_offers_buyer    ON offers (buyer_id);
 CREATE INDEX IF NOT EXISTS idx_deals_users     ON deals (buyer_id, seller_id);
 CREATE INDEX IF NOT EXISTS idx_searches_user   ON saved_searches (user_id);
+CREATE INDEX IF NOT EXISTS idx_comments_listing ON listing_comments (listing_id);
+CREATE INDEX IF NOT EXISTS idx_reports_target   ON reports (target_id, status);
 """
 
 #: Jadval nomi -> qo'shilishi mumkin bo'lgan ustunlar ro'yxati.
@@ -149,6 +178,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("listings", "expires_at", "ALTER TABLE listings ADD COLUMN expires_at TIMESTAMP"),
     ("users", "referred_by", "ALTER TABLE users ADD COLUMN referred_by INTEGER"),
     ("users", "free_vip", "ALTER TABLE users ADD COLUMN free_vip INTEGER DEFAULT 0"),
+    ("users", "is_verified", "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0"),
 )
 
 
@@ -625,6 +655,9 @@ class Database:
         photos = photos or []
         created = utcnow_iso()
         mode = "trade" if str(listing_mode).lower() == "trade" else "sell"
+        # Yopiq holda yaratilgan e'lonlar (`sold` / `found`) bozor statistikasi
+        # va kunlik hisobotlarda hisobga olinishi uchun `sold_at` darhol to'ladi.
+        closed_at = created if str(status).lower() in ("sold", "found") else None
         cursor = await self.conn.execute(
             """
             INSERT INTO listings (
@@ -632,7 +665,7 @@ class Database:
                 rank_info, skins_info, price_numeric,
                 price_display, old_price, contact, description, is_vip, photos,
                 channel_msg_id, status, last_bumped, sold_at, expires_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?)
             """,
             (
                 user_id,
@@ -648,6 +681,7 @@ class Database:
                 1 if is_vip else 0,
                 json.dumps(photos, ensure_ascii=False),
                 status,
+                closed_at,
                 days_from_now_iso(int(_runtime().get("LISTING_TTL_DAYS"))),
                 created,
             ),
@@ -1138,6 +1172,222 @@ class Database:
         ) as cursor:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    # ------------------------------------------------- botga baho / komment / shikoyat
+    async def set_bot_rating(self, user_id: int, rating: int, comment: str = "") -> bool:
+        """Botga baho qo'yadi (bir foydalanuvchi — bitta baho)."""
+        score = max(1, min(10, int(rating)))
+        await self.conn.execute(
+            """
+            INSERT INTO bot_ratings (user_id, rating, comment, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                rating     = excluded.rating,
+                comment    = excluded.comment,
+                created_at = excluded.created_at
+            """,
+            (int(user_id), score, (comment or "")[:300], utcnow_iso()),
+        )
+        await self.conn.commit()
+        return True
+
+    async def get_bot_rating(self) -> tuple[float, int]:
+        """Botning o'rtacha bahosi va baho qo'yganlar soni."""
+        async with self.conn.execute(
+            "SELECT AVG(rating) AS avg_rating, COUNT(*) AS cnt FROM bot_ratings"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or not row["cnt"]:
+            return 0.0, 0
+        return round(float(row["avg_rating"] or 0.0), 1), int(row["cnt"])
+
+    async def get_user_bot_rating(self, user_id: int) -> Optional[dict]:
+        """Foydalanuvchining botga qo'ygan bahosi."""
+        async with self.conn.execute(
+            "SELECT * FROM bot_ratings WHERE user_id = ?", (int(user_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def add_listing_comment(self, listing_id: int, user_id: int, text: str) -> int:
+        """E'longa izoh qo'shadi va ID qaytaradi."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO listing_comments (listing_id, user_id, text, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(listing_id), int(user_id), (text or "")[:400], utcnow_iso()),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def get_listing_comments(self, listing_id: int, limit: int = 20) -> list[dict]:
+        """E'londagi oxirgi izohlar (eskisidan yangiga)."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM listing_comments
+             WHERE listing_id = ?
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (int(listing_id), int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def count_listing_comments(self, listing_id: int) -> int:
+        """E'londagi izohlar soni."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM listing_comments WHERE listing_id = ?",
+            (int(listing_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"] if row else 0)
+
+    async def create_report(
+        self,
+        reporter_id: int,
+        target_id: int,
+        listing_id: Optional[int],
+        reason: str,
+        details: str = "",
+    ) -> int:
+        """Sotuvchi ustidan shikoyat qoldiradi."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO reports (reporter_id, target_id, listing_id, reason, details, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'new', ?)
+            """,
+            (
+                int(reporter_id),
+                int(target_id),
+                int(listing_id) if listing_id else None,
+                (reason or "")[:60],
+                (details or "")[:500],
+                utcnow_iso(),
+            ),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def has_open_report(self, reporter_id: int, target_id: int) -> bool:
+        """Bu foydalanuvchi ushbu shikoyatni allaqachon yuborganmi?"""
+        async with self.conn.execute(
+            "SELECT 1 FROM reports WHERE reporter_id = ? AND target_id = ? AND status = 'new' LIMIT 1",
+            (int(reporter_id), int(target_id)),
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def get_reports(self, status: str = "new", limit: int = 20) -> list[dict]:
+        """Shikoyatlar ro'yxati (eskisidan yangiga)."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM reports
+             WHERE (? IS NULL OR status = ?)
+             ORDER BY id DESC
+             LIMIT ?
+            """,
+            (status, status, int(limit)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def update_report_status(self, report_id: int, status: str) -> Optional[dict]:
+        """Shikoyat holatini o'zgartiradi."""
+        await self.conn.execute(
+            "UPDATE reports SET status = ? WHERE id = ?", (str(status), int(report_id))
+        )
+        await self.conn.commit()
+        async with self.conn.execute(
+            "SELECT * FROM reports WHERE id = ?", (int(report_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_report_stats(self, user_id: int) -> int:
+        """Ushbu foydalanuvchi ustidan kelgan hali ko'rilmagan shikoyatlar."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM reports WHERE target_id = ? AND status = 'new'",
+            (int(user_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"] if row else 0)
+
+    # --------------------------------------------------- sotuvchini tasdiqlash
+    async def set_verified(self, user_id: int, verified: bool) -> Optional[dict]:
+        """Sotuvchiga tasdiqlash belgisini qo'yadi yoki olib tashlaydi."""
+        await self.conn.execute(
+            "UPDATE users SET is_verified = ? WHERE user_id = ?",
+            (1 if verified else 0, int(user_id)),
+        )
+        await self.conn.commit()
+        return await self.get_user(user_id)
+
+    async def is_verified(self, user_id: int) -> bool:
+        """Sotuvchi tasdiqlanganmi?"""
+        user = await self.get_user(user_id)
+        return bool((user or {}).get("is_verified"))
+
+    async def count_verified_sellers(self) -> int:
+        """Tasdiqlangan sotuvchilar soni."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM users WHERE COALESCE(is_verified, 0) = 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"] if row else 0)
+
+    # --------------------------------------------------------- bozor statistikasi
+    async def get_market_stats(self, days: int = 30) -> list[dict]:
+        """Sotilgan e'lonlar bo'yicha rank ga ko'ra narx statistikasi.
+
+        Faqat `price_numeric` to'ldirilgan va `sold_at` belgilangan e'lonlar
+        hisobga olinadi — aks holda bitta noto'g'ri e'lon butun bozorni
+        buzadi.
+
+        Vaqt taqqoslashida `julianday()` ishlatiladi: `utcnow_iso()` ISO-8601
+        (`T` va `+00:00` bilan) yozadi, `datetime()` esa boshqa formatda
+        qaytaradi — oddiy matn taqqoslashi har doim notoʻgʻri natija beradi.
+        """
+        async with self.conn.execute(
+            """
+            SELECT rank_info                                AS rank,
+                   COUNT(*)                                AS cnt,
+                   ROUND(AVG(price_numeric))               AS avg_price,
+                   MIN(price_numeric)                      AS min_price,
+                   MAX(price_numeric)                      AS max_price
+              FROM listings
+             WHERE status = 'sold'
+               AND price_numeric IS NOT NULL
+               AND price_numeric > 0
+               AND rank_info IS NOT NULL
+               AND TRIM(rank_info) <> ''
+               AND sold_at IS NOT NULL
+               AND julianday(sold_at) >= julianday('now', ?)
+             GROUP BY rank_info
+             ORDER BY cnt DESC
+            """,
+            (f"-{max(1, int(days))} days",),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_price_suggestion(self, rank_info: str, days: int = 30) -> Optional[int]:
+        """Berilgan rank uchun bozor o'rtacha narxi (yo'q bo'lsa `None`)."""
+        async with self.conn.execute(
+            """
+            SELECT ROUND(AVG(price_numeric)) AS avg_price
+              FROM listings
+             WHERE status = 'sold'
+               AND price_numeric > 0
+               AND LOWER(TRIM(rank_info)) = LOWER(TRIM(?))
+               AND julianday(sold_at) >= julianday('now', ?)
+            """,
+            (str(rank_info or ""), f"-{max(1, int(days))} days"),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or row["avg_price"] is None:
+            return None
+        return int(row["avg_price"])
 
     async def has_reviewed(self, reviewer_id: int, seller_id: int) -> bool:
         """Foydalanuvchi bu sotuvchi haqida sharh qoldirganmi?"""

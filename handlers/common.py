@@ -412,13 +412,18 @@ async def check_sub(bot: Bot, user_id: int) -> bool:
     return False
 
 
+#: Sotuvchi tasdiqlanganligini belgilovchi nishon
+VERIFIED_BADGE = "✅"
+
+
 async def seller_label_of(listing: dict[str, Any]) -> str:
-    """E'lon egasi uchun yorliq."""
+    """E'lon egasi uchun yorliq (tasdiqlangan bo'lsa `✅` belgisi bilan)."""
     user = await db.get_user(int(listing["user_id"]))
     if user:
-        return user_label(
+        label = user_label(
             int(listing["user_id"]), user.get("username"), user.get("full_name")
         )
+        return f"{VERIFIED_BADGE} {label}" if user.get("is_verified") else label
     return f"ID: {listing['user_id']}"
 
 

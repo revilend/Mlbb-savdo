@@ -25,12 +25,15 @@ import config
 from database import db, storage_report
 from handlers import (
     admin,
+    bot_rating,
     calculator,
     catalog,
+    comments,
     common,
     favorites,
     garant,
     inbox,
+    market,
     my_listings,
     offers,
     reviews,
@@ -90,6 +93,9 @@ def build_dispatcher() -> Dispatcher:
     dispatcher.include_router(my_listings.router)
     dispatcher.include_router(settings_panel.router)
     dispatcher.include_router(garant.router)
+    dispatcher.include_router(market.router)
+    dispatcher.include_router(comments.router)
+    dispatcher.include_router(bot_rating.router)
     dispatcher.include_router(common.fallback_router)
 
     return dispatcher

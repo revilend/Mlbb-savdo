@@ -24,6 +24,11 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 | 📥 Takliflar va bitimlar | Kelgan takliflarni qabul/rad etish yoki javob yozish, bitim holatini kuzatish |
 | 🔔 Qidiruv obunasi | Narx oralig'i + kalit so'z bo'yicha obuna — mos yangi e'lon chiqsa darhol xabar |
 | ⭐️ Reyting va sharhlar | Sotuvchiga 1–5 baho va izoh; reyting e'lon kartochkasida ko'rinadi |
+| 💬 E'lonni bo'lishish | Sotuvgan e'longa izoh qoldirish — izohlar e'lon kartasida barchaga ko'rinadi |
+| ✅ Sotuvchini tasdiqlash | Admin sotuvchini tasdiqlaydi, e'lon kartochkasida `✅` ishonch belgisi chiqadi |
+| 🚨 Sotuvchini shikoyat qilish | E'lon kartasidan sabab tanlab shikoyat yuborish; admin panelida ko'rib chiqiladi |
+| 📈 Narx statistikasi | Faqat sotilgan e'lonlar bo'yicha rank kesimidagi o'rtacha narx va bozor tavsiyasi |
+| ⭐️ Botga baho | Botga 1–10 baho va izoh; o'rtacha baho statistikada, past bahoda admin xabardor |
 | ✏️ Tahrirlash | Aktiv/moderatsiyadagi e'londa narx, izoh va aloqani o'zgartirish |
 | 🔄 E'lonni yangilash | `LISTING_TTL_DAYS` tugagach e'lon arxivlanadi va bir tugma bilan yangilanadi |
 | 🔎 O'xshash e'lonlar | Kartochkadan shu narx oralig'idagi boshqa e'lonlarni ko'rish |
@@ -49,7 +54,7 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 ├── config.py            # .env dan standart sozlamalar
 ├── settings.py          # bot ichidan boshqariladigan runtime sozlamalar reyestri
 ├── ai.py                # OpenAI-mos AI moderatsiya mijozi
-├── database.py          # aiosqlite qatlami (9 jadval)
+├── database.py          # aiosqlite qatlami (12 jadval)
 ├── keyboards.py         # barcha klaviatura va tugma matnlari
 ├── states.py            # FSM holatlari
 ├── main.py              # ishga tushirish nuqtasi + fon vazifalari
@@ -61,7 +66,8 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 │   ├── test_self_destruct.py # TTL / reyestr / tozalagich testlari
 │   ├── test_features.py   # barter, narx tushirish, ulashish, kunlik hisobot, admin panel
 │   ├── test_features2.py  # sharhlar, taklif/bitim, obuna, referal, muddat, analitika
-│   └── test_features3.py  # bot ichidagi sozlamalar, AI moderatsiya va sozlamalar paneli
+│   ├── test_features3.py  # bot ichidagi sozlamalar, AI moderatsiya va sozlamalar paneli
+│   └── test_features4.py  # bozor statistikasi, shikoyat, komment, bot bahosi, tasdiqlash
 ├── middlewares/
 │   ├── anti_flood.py      # spamga qarshi cheklov (sliding window + mute)
 │   └── self_destruct.py   # o'z-o'zini o'chiruvchi xabarlar + /clean reyestri
@@ -74,6 +80,9 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
     ├── offers.py        # narx taklifi
     ├── inbox.py         # takliflar va bitimlar bo'limi
     ├── reviews.py       # sotuvchi reytingi va sharhlari
+    ├── market.py        # narx statistikasi, bozor tavsiyasi, sotuvchini shikoyat qilish
+    ├── comments.py      # e'lonni bo'lishish (izohlar)
+    ├── bot_rating.py    # botga 1–10 baho berish
     ├── subscriptions.py # saqlangan qidiruv (obuna)
     ├── calculator.py    # admin yordamida akkaunt baholash
     ├── scam_check.py    # firibgarni tekshirish
@@ -221,7 +230,12 @@ AI moderatsiya e'lonni matni bo'yicha tekshiradi (rank, skinlar, narx, izoh,
 aloqa) va **TASDIQLASH / RAD ETISH / QO'LDA TEKSHIRISH** tavsiyasini ishonch
 darajasi bilan beradi. Bot **OpenAI-mos** `chat/completions` API'si bilan
 ishlaydi, shuning uchun bitta kalit bilan OpenRouter, OpenAI, Groq, DeepInfra,
-Together, Mistral yoki o'z serveringizdan foydalanish mumkin.
+Together, Mistral yoki o'z serveringizdan foydalanish mumkin. Qoʻshimcha ravishda
+**Google Gemini** ham qoʻllab-quvvatlanadi — `AI_PROVIDER=gemini` yoki `AIza...`
+boshlanuvchi kalit kiritilsa, bot provaydnerni oʻzi aniqlaydi (`auto`).
+
+Eʼlon **rasmlari** ham tahlil qilinadi: birinchi 3 ta rasm yuklab, modelga
+base64 koʻrinishida yuboriladi. Rasm yuklanmasa ham moderatsiya davom etadi.
 
 **Admin panelidagi «🤖 AI» bo'limi** — bitta ekranda to'liq boshqaruv:
 
@@ -230,7 +244,8 @@ Together, Mistral yoki o'z serveringizdan foydalanish mumkin.
 | ✅ AI tekshiruvni yoqish / ⛔️ oʻchirish | AI moderatsiyani bir bosishda yoqadi yoki oʻchiradi (kalit bo'lmasa ogohlantiradi) |
 | 🔑 AI API kalitini kiritish | kalitni bot ichida kiritish (kiritilgan xabar chatdan o'chiriladi) |
 | 🔌 Ulanishni tekshirish | kalit, manzil va modelni darhol tekshiradi |
-| ⚙️ Barcha sozlamalar | model, `AI_BASE_URL`, avto-qarorlar, ishonch chegarasi, qo'shimcha qoidalar |
+| ⚙️ Barcha sozlamalar | model, `AI_PROVIDER`, `AI_BASE_URL`, avto-qarorlar, ishonch chegarasi, qo'shimcha qoidalar |
+| 📋 Modellarni koʻrish | kalitingizga mavjud modellarni roʻyxatlab, toʻgʻrisini bir tugma bilan tanlash |
 
 Ekranning yuqorisida joriy holat (yoqilgan/oʻchiqilgan), niqoblangan kalit,
 model va manzil ko'rinib turadi.
@@ -340,17 +355,18 @@ pytest tests/test_anti_flood.py -v
 pytest -k "mute or window"
 ```
 
-Suite **245 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
+Suite **345 ta test**dan iborat va tashqi tarmoqqa umuman murojaat qilmaydi
 (Telegram API soxtalashtiriladi, vaqt `Clock` fixture'i bilan boshqariladi,
 shuning uchun testlar tez va deterministik).
 
 | Fayl | Testlar | Qamrov |
 | --- | --- | --- |
 | `test_anti_flood.py` | 30 | sürgülü oyna, ogohlantirish throttling, mute va uning tugashi, purge, jimgina rejim, callback kafolati, bypass, GC, `build_anti_flood()` |
-| `test_self_destruct.py` | 40 | `temporary`/`permanent`, `MessageRegistry`, rejalashtirish qoidalari (kanal/guruh himoyasi), haqiqiy o'chirish, `shutdown()`, session zanjiri integratsiyasi, `sweep_chat()`, foydalanuvchi tozalagichi |
+| `test_self_destruct.py` | 42 | `temporary`/`permanent`, `MessageRegistry`, rejalashtirish qoidalari (kanal/guruh himoyasi), haqiqiy o'chirish, `shutdown()`, session zanjiri integratsiyasi, `sweep_chat()`, foydalanuvchi tozalagichi |
 | `test_features.py` | 37 | barter/rejim anketasi, narx tushirish (kanal + sevimlilar), ulashish tugmasi, qo'llanma, kunlik hisobot, admin va kanal boshqaruvi, yangi DB ustunlari |
-| `test_features2.py` | 65 | sharhlar va reyting, taklif/bitim oqimi, obuna va mos e'lon xabari, referal, e'lon tahriri va yangilash, o'xshash e'lonlar, muddat/tanlov/zaxira fon vazifalari, analitika |
-| `test_features3.py` | 73 | bot ichidagi sozlamalar (validatsiya, niqoblash, standartga qaytarish, guruhlar), AI javobini tahlil qilish, HTTP mijozi (qayta urinish, xato xaritalari), avto-tasdiq/rad, qoʻlda tekshirish, AI yoqish/oʻchirish paneli, sozlamalar paneli navigatsiyasi va admin cheklovi |
+| `test_features2.py` | 86 | sharhlar va reyting, taklif/bitim oqimi, obuna va mos e'lon xabari, referal, e'lon tahriri va yangilash, o'xshash e'lonlar, muddat/tanlov/zaxira fon vazifalari, analitika |
+| `test_features3.py` | 98 | bot ichidagi sozlamalar (validatsiya, niqoblash, standartga qaytarish, guruhlar), AI javobini tahlil qilish, HTTP mijozi (qayta urinish, xato xaritalari), avto-tasdiq/rad, qoʻlda tekshirish, AI yoqish/oʻchirish paneli, sozlamalar paneli navigatsiyasi va admin cheklovi |
+| `test_features4.py` | 52 | narx statistikasi (rank guruhlari, davr tanlash, bozor tavsiyasi), shikoyat oqimi (sabab, izoh, takrorlik), e'lon kommentlari, botga 1–10 baho (past bahoda admin ogohlantirishi), sotuvchini tasdiqlash va admin panelidagi shikoyatlar |
 
 **Regressiya himoyasi:** `test_default_settings_are_gentle` sukut qiymatlar
 yumshoq rejimda qolishini kafolatlaydi — kimdir chegaralarni qattiqlashtirsa,
@@ -362,7 +378,7 @@ test darhol yiqiladi.
 
 - `settings` — dinamik sozlamalar: adminlar ro'yxati, kanallar va bot ichidan
   kiritilgan barcha `cfg:*` qiymatlar (narx, vaqt, AI kaliti va hokazo)
-- `users` — foydalanuvchilar (`referred_by`, `free_vip` bilan)
+- `users` — foydalanuvchilar (`referred_by`, `free_vip`, `is_verified` bilan)
 - `listings` — e'lonlar (`sell` / `buy`, `listing_mode` `sell`/`trade`, `expires_at`)
 - `favorites` — sevimlilar
 - `blacklist` — firibgarlar ro'yxati
@@ -370,9 +386,12 @@ test darhol yiqiladi.
 - `saved_searches` — «🔔 Qidiruv obunasi» shartlari
 - `offers` — takliflar va ularning holati
 - `deals` — bitimlar va kuzatuv bosqichlari
+- `reports` — sotuvchi ustidan shikoyatlar va ularning holati
+- `listing_comments` — e'longa qoldirilgan izohlar
+- `bot_ratings` — botga berilgan baholar (1–10) va izohlar
 
 Eski bazalar avtomatik yangilanadi: `_MIGRATIONS` ro'yxati yetishmayotgan
-ustunlarni (masalan `listings.expires_at`, `users.free_vip`) `ALTER TABLE`
+ustunlarni (masalan `listings.expires_at`, `users.free_vip`, `users.is_verified`) `ALTER TABLE`
 bilan qo'shadi va bu amal idempotent.
 
 Zaxira nusxalar `BACKUP_DIR` (sukut: `backups/`) ichida

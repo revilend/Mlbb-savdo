@@ -23,6 +23,7 @@ from handlers.common import (
     send_listing_card,
     user_label,
 )
+from handlers.market import price_suggestion_text
 from handlers.moderation import ai_moderate_listing
 from keyboards import (
     BTN_DONE,
@@ -292,6 +293,14 @@ async def sell_price(message: Message, state: FSMContext) -> None:
     await state.update_data(price_numeric=price, price_display=format_price(price))
     await state.set_state(SellFSM.is_vip)
     credits = await db.get_free_vip(message.from_user.id) if message.from_user else 0
+
+    # Bozor narxini ko'rsatish — majburiy emas, ma'lumot bo'lmasa o'tkazib yuboramiz.
+    rank_info = str((await state.get_data()).get("rank_info") or "")
+    if rank_info:
+        suggestion = await price_suggestion_text(rank_info)
+        if suggestion:
+            await message.answer(suggestion, disable_web_page_preview=True)
+
     await message.answer(VIP_ASK, reply_markup=vip_kb("vip", credits))
 
 

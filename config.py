@@ -109,6 +109,8 @@ DIGEST_MINUTE: int = min(59, max(0, _env_int("DIGEST_MINUTE", 59)))
 # bu yerdagilar faqat standart (boshlang'ich) qiymat hisoblanadi.
 AI_ENABLED: bool = _env_bool("AI_ENABLED", False)
 AI_API_KEY: str = _env_str("AI_API_KEY")
+#: 'auto' — kalit va manzil bo'yicha o'zi aniqlaydi (openai | gemini)
+AI_PROVIDER: str = (_env_str("AI_PROVIDER", "auto") or "auto").lower()
 AI_BASE_URL: str = (
     _env_str("AI_BASE_URL", "https://openrouter.ai/api/v1")
     or "https://openrouter.ai/api/v1"

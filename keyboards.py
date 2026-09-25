@@ -77,6 +77,8 @@ BTN_GARANT = "🛡️ Garant xizmati"
 BTN_STATS = "📊 Statistika"
 BTN_GUIDE = "❓ Qoʻllanma"
 BTN_REVIEWS = "📖 Sharhlar"
+BTN_MARKET = "📈 Narx statistikasi"
+BTN_BOT_RATING = "⭐️ Botga baho"
 
 BTN_CANCEL = "❌ Bekor qilish"
 BTN_DONE = "✅ Tayyor"
@@ -90,6 +92,7 @@ MAIN_MENU_ROWS: list[list[str]] = [
     [BTN_REFERRAL, BTN_GARANT],
     [BTN_STATS, BTN_GUIDE],
     [BTN_REVIEWS],
+    [BTN_MARKET, BTN_BOT_RATING],
 ]
 
 ALL_MENU_BUTTONS: set[str] = {button for row in MAIN_MENU_ROWS for button in row}
@@ -283,7 +286,19 @@ def listing_action_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
                 callback_data=f"rvws_{int(listing.get('user_id') or 0)}",
             )
         )
+        extra.append(
+            InlineKeyboardButton(
+                text="🚨 Shikoyat qilish", callback_data=f"rep_l_{listing_id}"
+            )
+        )
     rows.append(extra)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="💬 Kommentlar", callback_data=f"cmt_{listing_id}"
+            )
+        ]
+    )
     if listing_type != "buy":
         rows.append(
             [
@@ -396,8 +411,10 @@ def ai_panel_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔌 Ulanishni tekshirish", callback_data="cfg_ai_test"),
-            InlineKeyboardButton(text="⚙️ Barcha sozlamalar", callback_data="cfg_g|ai"),
+            InlineKeyboardButton(text="📋 Modellarni koʻrish", callback_data="cfg_ai_models"),
         ],
+        [InlineKeyboardButton(text="🔎 Kalit qayerda ishlaydi?", callback_data="cfg_ai_find")],
+        [InlineKeyboardButton(text="⚙️ Barcha sozlamalar", callback_data="cfg_g|ai")],
         [InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -441,6 +458,7 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📈 Analitika", callback_data="adm_analytics"),
                 InlineKeyboardButton(text="💾 Zaxira nusxa", callback_data="adm_backup"),
             ],
+            [InlineKeyboardButton(text="🚨 Shikoyatlar", callback_data="adm_reports")],
             [InlineKeyboardButton(text="♻️ Bazani tiklash", callback_data="adm_restore")],
         ]
     )
@@ -464,6 +482,12 @@ def settings_groups_kb() -> InlineKeyboardMarkup:
         )
     rows.append(
         [InlineKeyboardButton(text="🔌 AI ulanishni tekshirish", callback_data="cfg_ai_test")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="📋 Modellarni koʻrish", callback_data="cfg_ai_models")]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="🔎 Kalit qayerda ishlaydi?", callback_data="cfg_ai_find")]
     )
     rows.append([InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -517,6 +541,14 @@ def setting_detail_kb(spec: Setting, group: str) -> InlineKeyboardMarkup:
     if spec.key == "AI_API_KEY":
         rows.append(
             [InlineKeyboardButton(text="🔌 Kalitni tekshirish", callback_data="cfg_ai_test")]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📋 Modellarni koʻrish", callback_data="cfg_ai_models"
+                ),
+                InlineKeyboardButton(text="🔎 Kalitni izlash", callback_data="cfg_ai_find"),
+            ]
         )
     rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"cfg_g|{group}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -690,11 +722,18 @@ def deal_admin_kb(buyer_id: int, seller_id: int, username_buyer: Optional[str] =
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dm_user_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Admin panelda foydalanuvchiga xabar yuborish tugmasi."""
+def dm_user_kb(user_id: int, verified: bool = False) -> InlineKeyboardMarkup:
+    """Admin panelda foydalanuvchiga xabar yuborish va tasdiqlash."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✉️ Xabar yuborish", callback_data=f"adm_dm_{user_id}")]
+            [
+                InlineKeyboardButton(
+                    text=("✅ Tasdiqlashni olib tashlash" if verified
+                          else "✅ Sotuvchini tasdiqlash"),
+                    callback_data=f"vfy_{int(user_id)}",
+                )
+            ],
+            [InlineKeyboardButton(text="✉️ Xabar yuborish", callback_data=f"adm_dm_{user_id}")],
         ]
     )
 
@@ -732,6 +771,107 @@ def deal_status_kb(deal_id: int) -> InlineKeyboardMarkup:
                     text="❌ Bekor qilindi", callback_data=f"dstat_{deal_id}_cancelled"
                 ),
             ],
+        ]
+    )
+
+
+def bot_rating_kb() -> InlineKeyboardMarkup:
+    """Botga baho berish uchun 1–10 tanlov (balanddan pastga)."""
+    half = 5
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=str(score), callback_data=f"botr_{score}")
+                for score in range(10, half, -1)
+            ],
+            [
+                InlineKeyboardButton(text=str(score), callback_data=f"botr_{score}")
+                for score in range(half, 0, -1)
+            ],
+        ]
+    )
+
+
+def comment_list_kb(listing_id: int) -> InlineKeyboardMarkup:
+    """E'lon kommentlari: ko'rish, yozish, e'lon kartasiga qaytish."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Komment yozish", callback_data=f"cmt_w_{listing_id}")],
+            [InlineKeyboardButton(text="🔙 Eʼlon kartasiga", callback_data=f"view_{listing_id}")],
+        ]
+    )
+
+
+#: Shikoyat sabablari: (matn, qisqa kod)
+REPORT_REASONS: tuple[tuple[str, str], ...] = (
+    ("🚨 Firibgarlik", "scam"),
+    ("📢 Yolgʻon eʼlon", "fake"),
+    ("💰 Real narx yashirilgan", "price"),
+    ("🤬 Qoʻpol munosabat", "abuse"),
+    ("🔁 Eʼlonni spam qilish", "spam"),
+    ("📝 Boshqa", "other"),
+)
+
+
+def report_reason_kb(listing_id: int, seller_id: int) -> InlineKeyboardMarkup:
+    """Shikoyat qilish sabablarini tanlash."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=label, callback_data=f"rep_r_{code}_{listing_id}_{seller_id}"
+            )
+        ]
+        for label, code in REPORT_REASONS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+#: Bozor statistikasi uchun taqqoslash davrlari (kun)
+MARKET_PERIODS: tuple[int, ...] = (7, 30, 90)
+
+
+def market_period_kb(current: int = 30) -> InlineKeyboardMarkup:
+    """Bozor statistikasining davrini o'zgartirish."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{days} kun" + (" ✅" if days == current else ""),
+                callback_data=f"mkt_{days}",
+            )
+            for days in MARKET_PERIODS
+        ],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="mkt_back")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def report_admin_kb(report_id: int, target_id: int) -> InlineKeyboardMarkup:
+    """Admin uchun shikoyatni ko'rish va yopish."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✅ Koʻrildi", callback_data=f"rep_ok_{report_id}"
+            ),
+            InlineKeyboardButton(
+                text="🚫 Rad etish", callback_data=f"rep_no_{report_id}"
+            ),
+        ]
+    ]
+    if target_id:
+        rows.append(
+            [InlineKeyboardButton(text="💬 Xabar yuborish", callback_data=f"adm_dm_{target_id}")]
+        )
+    rows.append([InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def verify_seller_kb(user_id: int, verified: bool) -> InlineKeyboardMarkup:
+    """Admin uchun sotuvchini tasdiqlash (badge) tugmasi."""
+    text = "✅ Olib tashlash" if verified else "✅ Sotuvchini tasdiqlash"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, callback_data=f"vfy_{int(user_id)}")],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="adm_back")],
         ]
     )
 

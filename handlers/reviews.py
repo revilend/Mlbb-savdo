@@ -312,6 +312,7 @@ async def seller_profile(callback: CallbackQuery) -> None:
     seller_id = int(raw_id)
     stats = await db.get_seller_stats(seller_id)
     name = esc(await _seller_name(seller_id))
+    verified = await db.is_verified(seller_id)
 
     if stats["rating"] > 0 and stats["reviews"] >= 3:
         verdict = "🟢 <b>Ishonchli sotuvchi</b>"
@@ -324,6 +325,10 @@ async def seller_profile(callback: CallbackQuery) -> None:
         f"👤 <b>{name}</b>",
         f"🆔 Telegram ID: <code>{seller_id}</code>",
         verdict,
+    ]
+    if verified:
+        lines.append("✅ <b>Tasdiqlangan sotuvchi</b> — admin tomonidan tekshirilgan.")
+    lines += [
         "",
         f"⭐️ <b>Reyting: {esc(format_rating(stats['rating'], stats['reviews']))}</b>",
         f"✅ Sotilgan eʼlonlar: <b>{stats['sold']}</b>",

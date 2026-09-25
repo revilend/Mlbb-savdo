@@ -100,7 +100,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("AI_ENABLED", "AI moderatsiya", "ai", "bool",
             description="Eʼlonlarni AI orqali avtomatik tekshirish"),
     Setting("AI_API_KEY", "AI API kaliti", "ai", "secret",
-            description="OpenRouter / OpenAI / Groq va h.k. kaliti"),
+            description="OpenRouter / OpenAI / Groq / Google Gemini kaliti"),
+    Setting("AI_PROVIDER", "AI provayderi", "ai", "str",
+            description="auto | openai | gemini — «auto» oʻzi aniqlaydi"),
     Setting("AI_BASE_URL", "AI manzili (base URL)", "ai", "str",
             description="Masalan https://openrouter.ai/api/v1"),
     Setting("AI_MODEL", "AI modeli", "ai", "str",
@@ -239,6 +241,8 @@ def validate(spec: Setting, text: str) -> Any:
 
     if spec.key == "AI_BASE_URL" and not raw.startswith(("http://", "https://")):
         raise SettingsError("Manzil http:// yoki https:// bilan boshlanishi kerak.")
+    if spec.key == "AI_PROVIDER" and raw not in ("auto", "openai", "gemini"):
+        raise SettingsError("Provayder: auto, openai yoki gemini.")
     if spec.key == "GARANT_USERNAME":
         cleaned = raw.lstrip("@").strip()
         if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", cleaned):

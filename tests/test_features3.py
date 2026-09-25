@@ -486,6 +486,10 @@ class FakeSession:
         self._captured.append({"url": url, "json": json, "headers": headers})
         return self._responses.pop(0)
 
+    def get(self, url, headers=None):
+        self._captured.append({"url": url, "json": None, "headers": headers})
+        return self._responses.pop(0)
+
 
 @pytest.fixture
 def http(monkeypatch):
@@ -566,7 +570,12 @@ async def test_moderate_listing_retries_without_json_mode(test_db, http):
 
 @pytest.mark.parametrize(
     "status,expected",
-    [(401, "Kalit notoʻgʻri"), (402, "mablagʻ"), (429, "chegarasi"), (500, "AI xatosi")],
+    [
+        (401, "Kalit qabul qilinmadi"),
+        (402, "mablagʻ"),
+        (429, "chegarasi"),
+        (500, "AI xatosi"),
+    ],
 )
 async def test_moderate_listing_maps_http_errors(test_db, http, status, expected):
     """HTTP xatolari tushunarli xabarga aylanadi."""
@@ -587,6 +596,279 @@ async def test_moderate_listing_requires_key(test_db):
         await ai.moderate_listing(await _make_listing())
 
     assert "kaliti" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Provayderni aniqlash
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "key,base,expected",
+    [
+        ("AIzaSyABC123", "", "gemini"),           # Google kaliti
+        ("sk-abc123", "https://generativelanguage.googleapis.com/v1beta", "gemini"),
+        ("sk-abc123", "https://openrouter.ai/api/v1", "openai"),
+        ("sk-abc123", "", "openai"),
+    ],
+)
+async def test_provider_auto_detect(test_db, key, base, expected):
+    """`auto` rejimda provayder kalit va manzil bo'yicha aniqlanadi."""
+    settings.load(
+        {
+            "AI_ENABLED": "true",
+            "AI_API_KEY": key,
+            "AI_BASE_URL": base,
+            "AI_PROVIDER": "auto",
+        }
+    )
+    assert ai.provider() == expected
+
+
+async def test_provider_explicit_override(test_db):
+    """Qo'lda tanlangan provayder avtomatik aniqlashdan ustun turadi."""
+    settings.load(
+        {
+            "AI_ENABLED": "true",
+            "AI_API_KEY": "AIzaSyABC123",
+            "AI_BASE_URL": "https://openrouter.ai/api/v1",
+            "AI_PROVIDER": "openai",
+        }
+    )
+    assert ai.provider() == "openai"
+
+
+async def test_gemini_ignores_foreign_base_url(test_db):
+    """Gemini kalitida boshqa provayder manzili e'tiborsiz qoldiriladi."""
+    settings.load(
+        {
+            "AI_ENABLED": "true",
+            "AI_API_KEY": "AIzaSyABC123",
+            "AI_BASE_URL": "https://openrouter.ai/api/v1",
+        }
+    )
+    assert ai._base_url() == ai.GEMINI_BASE
+
+
+async def test_model_falls_back_when_provider_mismatch(test_db):
+    """OpenRouter modeli Gemini'da ishlamaydi — standart model qo'yiladi."""
+    settings.load({"AI_MODEL": "openai/gpt-4o-mini", "AI_API_KEY": "AIzaSyABC123"})
+    assert ai.provider() == "gemini"
+    assert ai._model() == ai.DEFAULT_MODELS["gemini"]
+
+    settings.load({"AI_MODEL": "openai/gpt-4o-mini", "AI_API_KEY": "sk-abc"})
+    assert ai._model() == "openai/gpt-4o-mini"
+
+
+async def test_probe_endpoints_finds_working_provider(test_db, http):
+    """Kalit qaysi provayderda ishlayotgani aniqlanadi."""
+    await _enable_ai()
+    # Har bir endpoint bitta javob oladi: faqat uchinchi (Groq) qabul qiladi
+    http(
+        [
+            FakeResponse(401, "no"),
+            FakeResponse(401, "no"),
+            FakeResponse(200, json.dumps({"data": []})),
+            FakeResponse(401, "no"),
+            FakeResponse(401, "no"),
+            FakeResponse(401, "no"),
+        ]
+    )
+    results = await ai.probe_endpoints()
+
+    assert results[0] == ("https://openrouter.ai/api/v1", "OpenRouter", "❌ kalit mos kelmadi")
+    assert results[2][1] == "Groq"
+    assert results[2][2] == "✅ ishlaydi"
+    assert results[2][0] == "https://api.groq.com/openai/v1"
+
+
+async def test_probe_endpoints_requires_key(test_db):
+    """Kalitsiz izlash boshlanmaydi."""
+    settings.load({"AI_API_KEY": ""})
+
+    with pytest.raises(ai.AIError) as excinfo:
+        await ai.probe_endpoints()
+
+    assert "kaliti" in str(excinfo.value).lower()
+
+
+def test_known_endpoints_are_unique():
+    """Manzillar ro'yxatida takror bo'lmasligi kerak."""
+    bases = [base for base, _ in ai.KNOWN_ENDPOINTS]
+    assert len(bases) == len(set(bases)), "takroriy manzil bor"
+
+
+def test_unknown_provider_value_is_rejected():
+    """Sozlamada faqat maʼlum provayderlar qabul qilinadi."""
+    from settings import SPEC, SettingsError, validate
+
+    for value in ("auto", "openai", "gemini"):
+        assert validate(SPEC["AI_PROVIDER"], value) == value
+    with pytest.raises(SettingsError):
+        validate(SPEC["AI_PROVIDER"], "boshqa")
+
+
+# ---------------------------------------------------------------------------
+# Rasm (vision) tahlili
+# ---------------------------------------------------------------------------
+class FakeDownloadable:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def read_bytes(self) -> bytes:
+        return self._data
+
+
+class FakeBot:
+    """Rasm yuklab olishni imitatsiya qiladi."""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self._files = files
+
+    async def download(self, file_id: str) -> FakeDownloadable:
+        if file_id not in self._files:
+            raise OSError("topilmadi")
+        return FakeDownloadable(self._files[file_id])
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+async def test_photos_are_sent_for_openai(test_db, http):
+    """OpenAI-mos provayderga rasm `image_url` ko'rinishida yuboriladi."""
+    await _enable_ai()
+    listing = dict(await _make_listing())
+    listing["photos"] = ["f1", "f2"]
+    captured = http(
+        [
+            FakeResponse(
+                200, json.dumps({"choices": [{"message": {"content": '{"decision": "approve"}'}}]})
+            )
+        ]
+    )
+
+    await ai.moderate_listing(listing, bot=FakeBot({"f1": PNG, "f2": b"jpeg-bytes"}))
+
+    content = captured[0]["json"]["messages"][1]["content"]
+    assert isinstance(content, list), "rasm borligi uchun kontent ro'yxati bo'lishi kerak"
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+async def test_photos_are_sent_for_gemini(test_db, http):
+    """Gemini'ga rasm `inline_data` ko'rinishida yuboriladi."""
+    settings.load(
+        {"AI_ENABLED": "true", "AI_API_KEY": "AIzaSyABC123", "AI_MODEL": "gemini-3.8-flash"}
+    )
+    listing = dict(await _make_listing())
+    listing["photos"] = ["f1"]
+    captured = http(
+        [
+            FakeResponse(
+                200,
+                json.dumps(
+                    {"candidates": [{"content": {"parts": [{"text": '{"decision": "approve"}'}]}}]}
+                ),
+            )
+        ]
+    )
+
+    await ai.moderate_listing(listing, bot=FakeBot({"f1": PNG}))
+
+    parts = captured[0]["json"]["contents"][0]["parts"]
+    assert parts[0]["text"]
+    assert parts[1]["inline_data"]["mime_type"] == "image/png"
+    assert ":generateContent" in captured[0]["url"]
+
+
+async def test_missing_photo_does_not_break_moderation(test_db, http):
+    """Rasm yuklanmasa ham matn tahlili davom etadi."""
+    await _enable_ai()
+    listing = dict(await _make_listing())
+    listing["photos"] = ["yoq"]
+    http(
+        [
+            FakeResponse(
+                200, json.dumps({"choices": [{"message": {"content": '{"decision": "approve"}'}}]})
+            )
+        ]
+    )
+
+    verdict = await ai.moderate_listing(listing, bot=FakeBot({}))
+
+    assert verdict.decision == "approve"
+    assert "1 ta yuklanmadi" in verdict.photo_note
+
+
+async def test_no_bot_still_moderates_text(test_db, http):
+    """Bot obyekti bo'lmasa ham moderatsiya ishlaydi."""
+    await _enable_ai()
+    listing = dict(await _make_listing())
+    listing["photos"] = ["f1"]
+    captured = http(
+        [
+            FakeResponse(
+                200, json.dumps({"choices": [{"message": {"content": '{"decision": "approve"}'}}]})
+            )
+        ]
+    )
+
+    await ai.moderate_listing(listing, bot=None)
+
+    assert isinstance(captured[0]["json"]["messages"][1]["content"], str)
+
+
+# ---------------------------------------------------------------------------
+# Modellar ro'yxati va xatolar
+# ---------------------------------------------------------------------------
+async def test_list_models_for_openai(test_db, http):
+    """OpenAI-mos provayderdan modellar olinadi."""
+    await _enable_ai()
+    http([FakeResponse(200, json.dumps({"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}]}))])
+
+    models = await ai.list_models()
+
+    assert models == ["gpt-4o", "gpt-4o-mini"]
+
+
+async def test_list_models_for_gemini_strips_prefix(test_db, http):
+    """Gemini model nomidagi `models/` prefiksi olib tashlanadi."""
+    settings.load({"AI_ENABLED": "true", "AI_API_KEY": "AIzaSyABC123"})
+    http(
+        [
+            FakeResponse(
+                200,
+                json.dumps(
+                    {"models": [{"name": "models/gemini-3.8-flash"}, {"name": "models/gemini-3.1-pro"}]}
+                ),
+            )
+        ]
+    )
+
+    models = await ai.list_models()
+
+    assert models == ["gemini-3.1-pro", "gemini-3.8-flash"]
+
+
+async def test_list_models_reports_bad_key(test_db, http):
+    """Kalit noto'g'ri bo'lsa tushunarli xato qaytariladi."""
+    await _enable_ai()
+    http([FakeResponse(401, "no")])
+
+    with pytest.raises(ai.AIError) as excinfo:
+        await ai.list_models()
+
+    assert "Kalit qabul qilinmadi" in str(excinfo.value)
+
+
+async def test_unknown_model_points_to_model_list(test_db, http):
+    """Model topilmasa foydalanuvchi nima qilish kerakligi aytiladi."""
+    await _enable_ai()
+    http([FakeResponse(404, "not found")])
+
+    with pytest.raises(ai.AIError) as excinfo:
+        await ai.moderate_listing(await _make_listing())
+
+    assert "Modellarni koʻrish" in str(excinfo.value)
 
 
 async def test_moderate_listing_appends_extra_rules(test_db, http):
@@ -1000,7 +1282,7 @@ def test_settings_keyboards_reflect_values(test_db):
     assert "cfg_ai_test" in callbacks
 
     groups = settings_groups_kb()
-    assert len(_callbacks(groups)) == len(GROUPS) + 2
+    assert len(_callbacks(groups)) == len(GROUPS) + 4  # ulanish, modellar, izlash, orqaga
 
 
 # ---------------------------------------------------------------------------

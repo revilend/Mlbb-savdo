@@ -21,6 +21,7 @@ import ai
 from database import db
 from handlers.common import esc, menu_button_guard, safe_delete
 from keyboards import (
+    ai_panel_kb,
     main_menu_kb,
     setting_detail_kb,
     settings_groups_kb,
@@ -348,6 +349,92 @@ async def cfg_ai_test(callback: CallbackQuery, bot: Bot) -> None:
         "✅ <b>AI ulanishi ishlaydi!</b>\n\n"
         f"📌 Holat: {status}\n"
         f"🤖 Javob: <code>{esc(reply)}</code>"
+    )
+
+
+@router.callback_query(F.data == "cfg_ai_models")
+async def cfg_ai_models(callback: CallbackQuery) -> None:
+    """Kalit ishlatadigan provayderda mavjud modellarni ro'yxatlaydi."""
+    if not _is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await callback.answer("📋 Modellar yuklanmoqda…")
+    if not isinstance(callback.message, Message):
+        return
+
+    try:
+        models = await ai.list_models()
+    except ai.AIError as exc:
+        await callback.message.answer(
+            "❌ <b>Modellarni olib boʻlmadi</b>\n\n"
+            f"🛠 Xato: {esc(str(exc))}\n\n"
+            "Avval kalitni kiriting, keyin «🔌 Ulanishni tekshirish» bilan "
+            "tekshirib koʻring."
+        )
+        return
+
+    current = str(settings.get("AI_MODEL") or "")
+    text = (
+        "📋 <b>Mavjud modellar</b>\n\n"
+        f"🔌 Provayder: {esc(ai.PROVIDER_LABELS[ai.provider()])}\n"
+        f"⚙️ Joriy model: <code>{esc(current or ai.active_model())}</code>\n"
+        f"📊 Jami: <b>{len(models)}</b>\n\n"
+    )
+    shown = models[:25]
+    text += "\n".join(f"• <code>{esc(name)}</code>" for name in shown)
+    if len(models) > len(shown):
+        text += f"\n\n… va yana {len(models) - len(shown)} ta."
+
+    text += (
+        "\n\nℹ️ Kerakli modelni «🤖 AI moderatsiya» → «AI modeli» orqali "
+        "kiriting."
+    )
+    await callback.message.answer(
+        text, disable_web_page_preview=True, reply_markup=ai_panel_kb()
+    )
+
+
+@router.callback_query(F.data == "cfg_ai_find")
+async def cfg_ai_find(callback: CallbackQuery) -> None:
+    """Kalit qaysi provayderda ishlashini aniqlaydi."""
+    if not _is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await callback.answer("🔎 Texhirilmoqda…")
+    if not isinstance(callback.message, Message):
+        return
+
+    try:
+        results = await ai.probe_endpoints()
+    except ai.AIError as exc:
+        await callback.message.answer(f"❌ <b>Tekshira olmadi</b>\n\n🛠 Xato: {esc(str(exc))}")
+        return
+
+    working = [item for item in results if item[2].startswith("✅")]
+    lines = ["🔎 <b>Kalit qayerda ishlaydi?</b>\n"]
+    for base, name, outcome in results:
+        lines.append(f"{outcome} <b>{esc(name)}</b> — <code>{esc(base)}</code>")
+
+    if working:
+        base, name, _ = working[0]
+        lines.append(
+            f"\n\n✅ Topildi: <b>{esc(name)}</b>\n"
+            f"«AI manzili (base URL)» sozlamasiga quyidagini yozing:\n"
+            f"<code>{esc(base)}</code>\n\n"
+            "Kalitni aynan shu provayderdan olgan bo'lishingiz kerak."
+        )
+    else:
+        lines.append(
+            "\n\n❌ Hech qanday odiiy provayderda ishlamadi. Ehtimol kalit "
+            "notoʻgʻri yoki bu maxsus xizmat kaliti (masalan Google).\n"
+            "Google kaliti boʻlsa «AI provayderi» sozlamasini <code>gemini</code> "
+            "qiling."
+        )
+
+    await callback.message.answer(
+        "\n".join(lines), disable_web_page_preview=True, reply_markup=ai_panel_kb()
     )
 
 

@@ -78,7 +78,7 @@ async def ai_moderate_listing(bot: Bot, listing_id: int) -> ModerationOutcome:
         return ModerationOutcome()
 
     try:
-        verdict = await ai.moderate_listing(listing)
+        verdict = await ai.moderate_listing(listing, bot=bot)
     except ai.AIError as exc:
         logger.warning("AI moderatsiya ishlamadi (#%s): %s", listing_id, exc)
         return ModerationOutcome(
@@ -118,7 +118,7 @@ async def manual_ai_check(bot: Bot, listing_id: int) -> tuple[str, bool]:
         return "⚠️ Eʼlon topilmadi.", False
 
     try:
-        verdict = await ai.moderate_listing(listing)
+        verdict = await ai.moderate_listing(listing, bot=bot)
     except ai.AIError as exc:
         logger.warning("Qoʻlda AI tekshiruvi ishlamadi (#%s): %s", listing_id, exc)
         return f"⚠️ <b>AI tekshiruvi bajarilmadi</b>\n\n🛠 Xato: {esc(str(exc))}", False

@@ -8,12 +8,15 @@ from __future__ import annotations
 
 __all__ = [
     "admin",
+    "bot_rating",
     "calculator",
     "catalog",
+    "comments",
     "common",
     "favorites",
     "garant",
     "inbox",
+    "market",
     "moderation",
     "my_listings",
     "offers",

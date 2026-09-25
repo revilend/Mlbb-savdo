@@ -16,6 +16,7 @@ from typing import Optional
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
@@ -51,7 +52,9 @@ from keyboards import (
     listing_action_kb,
     main_menu_kb,
     moderation_kb,
+    report_admin_kb,
     single_button_kb,
+    verify_seller_kb,
 )
 from handlers.subscriptions import notify_subscribers
 from settings import settings
@@ -294,8 +297,10 @@ async def _render_ai_panel(callback: CallbackQuery, note: str = "") -> None:
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"Holat: <b>{'✅ yoqilgan' if settings.get_bool('AI_ENABLED') else '⛔️ oʻchirilgan'}</b>\n"
         f"Kalit: <code>{esc(settings.display('AI_API_KEY'))}</code>\n"
-        f"Model: <code>{esc(str(settings.get('AI_MODEL') or '—'))}</code>\n"
-        f"Manzil: <code>{esc(str(settings.get('AI_BASE_URL') or '—'))}</code>\n"
+        f"Provayder: <b>{esc(ai.PROVIDER_LABELS[ai.provider()])}</b>\n"
+        f"Model: <code>{esc(ai.active_model())}</code>\n"
+        f"Manzil: <code>{esc(ai.active_base_url() or '—')}</code>\n"
+        "🖼 Rasmlar: <b>tahlil qilinadi</b> (birinchi 3 ta)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"Avto-tasdiqlash: {settings.display('AI_AUTO_APPROVE')}\n"
         f"Avto-rad (firibgarlik): {settings.display('AI_REJECT_SCAMS')}\n"
@@ -304,9 +309,11 @@ async def _render_ai_panel(callback: CallbackQuery, note: str = "") -> None:
     if note:
         text += f"\n\n{note}"
     text += (
-        "\n\nHar bir yangi e'lon AI orqali tekshiriladi va natija shu yerda "
-        "koʻrinadi. E'lon kartochkasidagi «🤖 AI tekshiruvi (qoʻlda)» tugmasi "
-        "bilan istalgan vaqtda qayta tekshirish mumkin."
+        "\n\nHar bir yangi e'lon AI orqali matni va rasmlari bo'yicha tekshiriladi "
+        "va natija shu yerda koʻrinadi. E'lon kartochkasidagi «🤖 AI tekshiruvi "
+        "(qoʻlda)» tugmasi bilan istalgan vaqtda qayta tekshirish mumkin.\n\n"
+        "💡 Kalit ishlamasa «📋 Modellarni koʻrish» tugmasi bilan mavjud "
+        "modellarni koʻrib, toʻgʻrisini «AI modeli» orqali kiriting."
     )
 
     if not isinstance(callback.message, Message):
@@ -1238,6 +1245,8 @@ async def lookup_user(message: Message, state: FSMContext) -> None:
 
     stats = await db.get_user_stats(int(user["user_id"]))
     is_banned = bool(user.get("is_banned"))
+    is_verified = bool(user.get("is_verified"))
+    open_reports = await db.get_report_stats(int(user["user_id"]))
     blacklisted = await db.is_blacklisted(str(user["user_id"]))
     if blacklisted is None and user.get("username"):
         blacklisted = await db.is_blacklisted(str(user["username"]))
@@ -1249,7 +1258,9 @@ async def lookup_user(message: Message, state: FSMContext) -> None:
         f"📛 Ism: {esc(user.get('full_name') or '—')}\n"
         f"📅 Roʻyxatdan oʻtgan: {esc(str(user.get('joined_at') or '—')[:19])}\n"
         f"🚫 Bloklangan: {'Ha' if is_banned else 'Yoʻq'}\n"
-        f"⛔️ Qora roʻyxatda: {'Ha' if blacklisted else 'Yoʻq'}\n\n"
+        f"⛔️ Qora roʻyxatda: {'Ha' if blacklisted else 'Yoʻq'}\n"
+        f"✅ Tasdiqlangan sotuvchi: {'Ha' if is_verified else 'Yoʻq'}\n"
+        f"🚨 Koʻrilmagan shikoyatlar: <b>{open_reports}</b>\n\n"
         "📋 <b>Eʼlonlar statistikasi</b>\n"
         f"• Jami: <b>{stats['total']}</b>\n"
         f"• Aktiv: <b>{stats['active']}</b>\n"
@@ -1259,7 +1270,9 @@ async def lookup_user(message: Message, state: FSMContext) -> None:
     )
 
     await message.answer(
-        text, reply_markup=dm_user_kb(int(user["user_id"])), disable_web_page_preview=True
+        text,
+        reply_markup=dm_user_kb(int(user["user_id"]), verified=is_verified),
+        disable_web_page_preview=True,
     )
 
 
@@ -1349,6 +1362,224 @@ async def ban_reason(message: Message, state: FSMContext) -> None:
             f"ℹ️ <code>{esc(identifier)}</code> allaqachon qora roʻyxatda mavjud.",
             reply_markup=main_menu_kb(),
         )
+
+
+# ---------------------------------------------------------------------------
+# 🚨 Shikoyatlar
+# ---------------------------------------------------------------------------
+REPORT_STATUS_LABELS = {"new": "🆕 Yangi", "done": "✅ Koʻrildi", "rejected": "🚫 Rad etilgan"}
+
+
+async def _report_text(report: dict) -> str:
+    """Bitta shikoyatni to'liq matn ko'rinishida chiqaradi."""
+    target = await db.get_user(int(report["target_id"]))
+    reporter = await db.get_user(int(report["reporter_id"]))
+    target_label = user_label(
+        int(report["target_id"]),
+        (target or {}).get("username"),
+        (target or {}).get("full_name"),
+    )
+    reporter_label = user_label(
+        int(report["reporter_id"]),
+        (reporter or {}).get("username"),
+        (reporter or {}).get("full_name"),
+    )
+    total = await db.get_report_stats(int(report["target_id"]))
+
+    lines = [
+        f"🚨 <b>Shikoyat #{report['id']}</b>\n",
+        f"📌 Sabab: <b>{esc(str(report.get('reason') or '—'))}</b>",
+        f"🗂 Holat: {REPORT_STATUS_LABELS.get(str(report.get('status')), '—')}",
+    ]
+    if report.get("listing_id"):
+        lines.append(f"🆔 Eʼlon: #{report['listing_id']}")
+    lines += [
+        f"👤 Sotuvchi: {esc(target_label)} (<code>{report['target_id']}</code>)",
+        f"🙋 Shikoyat qilgan: {esc(reporter_label)} (<code>{report['reporter_id']}</code>)",
+    ]
+    if report.get("details"):
+        lines.append(f"📝 Izoh: {esc(str(report['details']))}")
+    lines.append(f"📅 {esc(str(report.get('created_at') or '—')[:19])}")
+    lines.append(f"📊 Bu sotuvchining umumiy shikoyatlari: <b>{total}</b>")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "adm_reports")
+async def adm_reports(callback: CallbackQuery) -> None:
+    """Yangi shikoyatlar ro'yxatini ko'rsatadi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    reports = await db.get_reports(status="new", limit=20)
+    if not reports:
+        await callback.answer("Hammasi joyida.")
+        if isinstance(callback.message, Message):
+            await _reply(callback.message, "🚨 <b>Yangi shikoyatlar yoʻq.</b>\n\nHammasi joyida.")
+        return
+
+    lines = [f"🚨 <b>Yangi shikoyatlar ({len(reports)})</b>\n"]
+    for report in reports:
+        target = await db.get_user(int(report["target_id"]))
+        target_label = user_label(
+            int(report["target_id"]),
+            (target or {}).get("username"),
+            (target or {}).get("full_name"),
+        )
+        lines.append(
+            f"• <b>#{report['id']}</b> — {esc(str(report.get('reason') or '—'))} · "
+            f"{esc(target_label)}"
+        )
+    lines.append("\nKoʻrish uchun tugmani bosing.")
+
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"#{report['id']} · {str(report.get('reason') or '—')[:24]}",
+                    callback_data=f"vrep_{report['id']}",
+                )
+            ]
+            for report in reports
+        ]
+        + [[InlineKeyboardButton(text="⬅️ Admin panel", callback_data="adm_back")]]
+    )
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text(
+                "\n".join(lines), reply_markup=markup, disable_web_page_preview=True
+            )
+        except TelegramAPIError:
+            await callback.message.answer(
+                "\n".join(lines), reply_markup=markup, disable_web_page_preview=True
+            )
+
+
+@router.callback_query(F.data.startswith("rep_ok_"))
+async def adm_report_done(callback: CallbackQuery) -> None:
+    """Shikoyatni «koʻrildi» deb yopadi."""
+    await _close_report(callback, "done", "✅ Shikoyat koʻrildi deb belgilandi.")
+
+
+@router.callback_query(F.data.startswith("rep_no_"))
+async def adm_report_reject(callback: CallbackQuery) -> None:
+    """Shikoyatni rad etadi."""
+    await _close_report(callback, "rejected", "🚫 Shikoyat rad etildi.")
+
+
+async def _close_report(callback: CallbackQuery, status: str, notice: str) -> None:
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    raw = (callback.data or "").rsplit("_", 1)[-1]
+    if not raw.isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    report = await db.update_report_status(int(raw), status)
+    if report is None:
+        await callback.answer("❌ Shikoyat topilmadi.", show_alert=True)
+        return
+
+    await callback.answer(notice)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"{notice}\n\n🆔 Shikoyat: <b>#{report['id']}</b>",
+            reply_markup=admin_panel_kb(),
+        )
+
+
+@router.callback_query(F.data.startswith("vrep_"))
+async def adm_report_by_id(callback: CallbackQuery) -> None:
+    """Shikoyatni ID bo'yicha ochadi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    raw = (callback.data or "").split("_", 1)[-1]
+    if not raw.isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    report_id = int(raw)
+    report = next(
+        (item for item in await db.get_reports(status=None, limit=200) if int(item["id"]) == report_id),
+        None,
+    )
+    if report is None:
+        await callback.answer("❌ Shikoyat topilmadi.", show_alert=True)
+        return
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            await _report_text(report),
+            reply_markup=report_admin_kb(int(report["id"]), int(report["target_id"])),
+            disable_web_page_preview=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# ✅ Sotuvchini tasdiqlash (badge)
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data.startswith("vfy_"))
+async def adm_verify_seller(callback: CallbackQuery, bot: Optional[Bot] = None) -> None:
+    """Sotuvchining tasdiqlash belgisini yoqadi yoki olib tashlaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    raw = (callback.data or "").split("_", 1)[-1]
+    if not raw.lstrip("-").isdigit():
+        await callback.answer("❌ Notoʻgʻri soʻrov.", show_alert=True)
+        return
+
+    user_id = int(raw)
+    user = await db.get_user(user_id)
+    if user is None:
+        await callback.answer("❌ Foydalanuvchi topilmadi.", show_alert=True)
+        return
+
+    now_verified = not bool(user.get("is_verified"))
+    await db.set_verified(user_id, now_verified)
+    total = await db.count_verified_sellers()
+    label = user_label(user_id, user.get("username"), user.get("full_name"))
+
+    # `bot` inyeksiya orqali keladi; eski kontekstda `callback.bot` ishlatiladi.
+    notifier = bot or callback.bot
+    if now_verified and notifier is not None:
+        try:
+            await notifier.send_message(
+                user_id,
+                "✅ <b>Siz tasdiqlandingiz!</b>\n\n"
+                "Endi eʼlonlaringiz yonida <b>✅</b> belgisi koʻrinadi — "
+                "bu xaridorlar uchun ishonch belgisi.",
+                disable_web_page_preview=True,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Tasdiqlash xabari yuborilmadi (user=%s): %s", user_id, exc)
+
+    await callback.answer(
+        "✅ Tasdiqlandi" if now_verified else "Belgi olib tashlandi"
+    )
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            (f"✅ <b>{esc(label)}</b> tasdiqlandi.\n" if now_verified
+             else f"🔻 <b>{esc(label)}</b> tasdiqlash belgisi olib tashlandi.\n")
+            + f"📊 Tasdiqlangan sotuvchilar: <b>{total}</b>",
+            reply_markup=verify_seller_kb(user_id, now_verified),
+        )
+
+
+async def _reply(message: Message, text: str) -> None:
+    """Xabarni tahrirlashga yoki yangisini yuborishga urinadi."""
+    try:
+        await message.edit_text(text, reply_markup=admin_panel_kb())
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=admin_panel_kb())
 
 
 __all__ = ["router", "approve_listing", "reject_listing", "is_admin"]
