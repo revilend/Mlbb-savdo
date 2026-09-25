@@ -19,6 +19,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
+from aiohttp import web
 
 import config
 from database import db
@@ -428,6 +429,41 @@ async def stop_background_tasks(tasks: List[asyncio.Task]) -> None:
             logger.debug("Fon vazifasi toʻxtatildi: %s", exc)
 
 
+async def start_health_server() -> Optional[web.AppRunner]:
+    """Render Web Service uchun health endpoint ishga tushiradi.
+
+    Render Worker'ga ``PORT`` berilmaydi; bunday holatda portni band qilib
+    bot polling'ini xavf ostiga qoʻymaslik uchun health server ishga tushirilmaydi.
+    Web Service'ga esa Render ``PORT`` muhit oʻzgaruvchisini avtomatik beradi.
+    """
+    raw_port = str(os.getenv("PORT") or "").strip()
+    if not raw_port:
+        logger.debug("PORT berilmagan — health server ishga tushirilmaydi.")
+        return None
+
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        logger.warning("PORT notoʻgʻri: %r — health server oʻtkazib yuboriladi", raw_port)
+        return None
+    if not 1 <= port <= 65535:
+        logger.warning("PORT diapazonidan tashqarida: %s — health server oʻtkazib yuboriladi", port)
+        return None
+
+    async def health(_: web.Request) -> web.Response:
+        return web.Response(text="MLBB Market bot is running\n")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info("Health endpoint 0.0.0.0:%s portida ishga tushdi", port)
+    return runner
+
+
 async def main() -> None:
     """Botni ishga tushiradi."""
     logging.basicConfig(
@@ -475,15 +511,30 @@ async def main() -> None:
     await set_bot_commands(bot)
 
     background_tasks = start_background_tasks(bot)
+    health_runner: Optional[web.AppRunner] = None
+    polling_task: Optional[asyncio.Task] = None
 
     try:
+        health_runner = await start_health_server()
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Polling boshlandi. Toʻxtatish uchun Ctrl+C bosing.")
-        await dispatcher.start_polling(
-            bot,
-            allowed_updates=dispatcher.resolve_used_update_types(),
+        polling_task = asyncio.create_task(
+            dispatcher.start_polling(
+                bot,
+                allowed_updates=dispatcher.resolve_used_update_types(),
+            ),
+            name="telegram_polling",
         )
+        await polling_task
     finally:
+        if polling_task is not None and not polling_task.done():
+            polling_task.cancel()
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
+        if health_runner is not None:
+            await health_runner.cleanup()
         await stop_background_tasks(background_tasks)
         await self_destruct.shutdown()
         if user_cleaner is not None:
