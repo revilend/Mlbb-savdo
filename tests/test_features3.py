@@ -956,6 +956,23 @@ def test_garant_links_follow_settings(test_db):
     assert any(btn.url == "https://t.me/super_garant" for btn in buttons)
 
 
+def test_legacy_garant_username_is_migrated(test_db):
+    """Eski `my_garant` qiymati bazada qolsa ham joriy garantga o'tadi."""
+    settings.load({f"{settings.PREFIX}GARANT_USERNAME": "my_garant"})
+    assert garant_username() == config.DEFAULT_GARANT_USERNAME
+    assert garant_url() == f"https://t.me/{config.DEFAULT_GARANT_USERNAME}"
+
+    settings.load({})
+
+
+def test_other_garant_username_is_untouched(test_db):
+    """Boshqa qiymatlar migratsiyadan chetlab o'tadi."""
+    settings.load({"GARANT_USERNAME": "real_garant"})
+    assert garant_username() == "real_garant"
+
+    settings.load({})
+
+
 def garant_kb_rows():
     """Garant klaviaturasi qatorlari."""
     return keyboards.garant_kb().inline_keyboard

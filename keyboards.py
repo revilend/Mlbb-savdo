@@ -108,7 +108,7 @@ RANKS: list[str] = [
 def garant_username() -> str:
     """Garant akkauntining username'i (bot ichidan o'zgartiriladi)."""
     raw = str(settings.get("GARANT_USERNAME") or "").strip().lstrip("@")
-    return raw or "my_garant"
+    return raw or config.DEFAULT_GARANT_USERNAME
 
 
 def garant_url() -> str:

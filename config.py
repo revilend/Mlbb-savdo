@@ -83,8 +83,11 @@ BOT_TOKEN: str = _env_str("BOT_TOKEN")
 ADMIN_ID: int = _env_int("ADMIN_ID", 0)
 DEFAULT_CHANNEL_ID: str = _env_str("DEFAULT_CHANNEL_ID", "@mlbb_savdo")
 
-_garant_raw = _env_str("GARANT_USERNAME", "my_garant")
-GARANT_USERNAME: str = _garant_raw.lstrip("@").strip() or "my_garant"
+#: Bot ishga tushmagan paytdagi garant akkaunti (@ belgisisiz)
+DEFAULT_GARANT_USERNAME: str = "mlbbSATORU"
+
+_garant_raw = _env_str("GARANT_USERNAME", DEFAULT_GARANT_USERNAME)
+GARANT_USERNAME: str = _garant_raw.lstrip("@").strip() or DEFAULT_GARANT_USERNAME
 GARANT_URL: str = f"https://t.me/{GARANT_USERNAME}"
 
 # --- Baza --------------------------------------------------------------------

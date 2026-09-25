@@ -106,7 +106,7 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
    BOT_TOKEN=123456789:AA...      # @BotFather dan
    ADMIN_ID=123456789             # @userinfobot dan
    DEFAULT_CHANNEL_ID=@mlbb_savdo # e'lonlar joylanadigan kanal
-   GARANT_USERNAME=my_garant      # garant akkunti (@ belgisisiz)
+   GARANT_USERNAME=mlbbSATORU     # garant akkunti (@ belgisisiz)
    ```
 
    > **Faqat shu ikkitasi majburiy:** `BOT_TOKEN` va `ADMIN_ID`. Qolgan

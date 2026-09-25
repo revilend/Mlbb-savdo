@@ -95,7 +95,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("DEFAULT_CHANNEL_ID", "Asosiy kanal", "channels", "str",
             description="Masalan @mlbb_savdo yoki -1001234567890"),
     Setting("GARANT_USERNAME", "Garant akkaunti", "channels", "str",
-            description="@ belgisisiz, masalan my_garant"),
+            description="@ belgisisiz, masalan mlbbSATORU"),
     # --- AI moderatsiya ---------------------------------------------------
     Setting("AI_ENABLED", "AI moderatsiya", "ai", "bool",
             description="Eʼlonlarni AI orqali avtomatik tekshirish"),
@@ -277,6 +277,10 @@ class SettingsStore:
 
     PREFIX = "cfg:"
 
+    #: Eski `my_garant` placeholder'ini yangi garant akkauntiga ko'chirish.
+    #: Doimiy diskda eski qiymat qolib ketsa, tugma yana `@my_garant` ko'rsatardi.
+    _LEGACY_MIGRATIONS = {"GARANT_USERNAME": ("my_garant", config.DEFAULT_GARANT_USERNAME)}
+
     def __init__(self) -> None:
         self._raw: dict[str, str] = {}
 
@@ -292,7 +296,15 @@ class SettingsStore:
             clean = key[len(self.PREFIX):] if key.startswith(self.PREFIX) else key
             if clean in SPEC:
                 values[clean] = value
+        self._migrate_legacy(values)
         self._raw = values
+
+    @staticmethod
+    def _migrate_legacy(values: dict[str, str]) -> None:
+        """Eski placeholder qiymatlarni joriy standartga almashtiradi."""
+        for key, (old, new) in SettingsStore._LEGACY_MIGRATIONS.items():
+            if key in values and values[key] == old and new != old:
+                values[key] = new
 
     def as_dict(self) -> dict[str, str]:
         """Xotiradagi qiymatlar nusxasi (testlar uchun foydali)."""

@@ -16,7 +16,7 @@ services:
       - key: DEFAULT_CHANNEL_ID
         value: @mlbb_savdo
       - key: GARANT_USERNAME
-        value: my_garant
+        value: mlbbSATORU
       - key: DB_PATH
         value: /var/data/market_database.sqlite3
       - key: BACKUP_DIR
