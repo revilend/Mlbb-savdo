@@ -58,7 +58,7 @@ WELCOME_TEXT = (
     "Bu yerda siz:\n"
     "• 🔍 oʻzingizga mos akkauntni topishingiz\n"
     "• 💰 oʻz akkauntingizni sotasiz\n"
-    "• 🧮 real narxni hisoblaysiz\n"
+    "• 🔍 akkauntingizni admin yordamida baholaysiz\n"
     "• 🛡️ firibgarlardan himoyalanasiz\n\n"
     "Kerakli boʻlimni menyudan tanlang 👇"
 )

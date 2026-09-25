@@ -12,7 +12,7 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
 | 🎲 Tasodifiy akkaunt | Bazadan tasodifiy aktiv e'lonni ko'rsatadi |
 | 💵 Narx bo'yicha saralash | 100k gacha / 100k–400k / 400k+ oralig'i |
 | ⭐️ Sevimlilarim | E'lonlarni saqlash va ro'yxatini ko'rish |
-| 🧮 Narx kalkulyatori | Rank va skin toifalari asosida real bozor narxini hisoblaydi |
+| 🔍 Akkauntni baholatish | Skrinshotlarni adminga yuborib, bozor narxini admin baholashidan olish |
 | 🛡️ Firibgarni tekshirish | Qora ro'yxatdan username yoki ID bo'yicha tekshirish |
 | 📋 Mening e'lonlarim | Holatni ko'rish, «Sotildi» belgilash, 24 soatda bir marta UP |
 | 🛡️ Garant xizmati | Xavfsiz bitim jarayoni va Moonton akkauntni o'tkazish ro'yxati |
@@ -75,7 +75,7 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
     ├── inbox.py         # takliflar va bitimlar bo'limi
     ├── reviews.py       # sotuvchi reytingi va sharhlari
     ├── subscriptions.py # saqlangan qidiruv (obuna)
-    ├── calculator.py    # narx kalkulyatori
+    ├── calculator.py    # admin yordamida akkaunt baholash
     ├── scam_check.py    # firibgarni tekshirish
     ├── my_listings.py   # mening e'lonlarim (sold / UP / tahrir / yangilash)
     ├── moderation.py    # AI moderatsiya natijasini qo'llash (avto-tasdiq/rad)
@@ -127,6 +127,28 @@ uchun to'liq tayyor Telegram bot. Python, aiogram 3.x va aiosqlite asosida yozil
    ```bash
    python main.py
    ```
+
+## ☁️ Render'da joylash
+
+Loyiha uchun `render.yaml` fayli tayyor. Render'da **Background Worker** yaratish uchun:
+
+1. GitHub repositoriyasini Render'ga ulang.
+2. **New → Blueprint** tanlang va shu repository'ni ko'rsating.
+3. Render so'raydigan `BOT_TOKEN` va `ADMIN_ID` qiymatlarini kiriting.
+4. `AI_API_KEY` ni faqat AI moderatsiyani yoqish kerak bo'lsa kiriting.
+5. Botni kanalda administrator qilib qo'shing va deployni boshlang.
+
+`render.yaml` botni `/var/data` doimiy diskinga ulaydi. Shu sababli SQLite baza va zaxira nusxalari Render redeploy qilinganda ham saqlanadi. Render Worker va doimiy disk uchun to'lovli reja kerak bo'lishi mumkin.
+
+Muhim environment qiymatlari:
+
+- `BOT_TOKEN` — BotFather tokeni, majburiy.
+- `ADMIN_ID` — asosiy admin Telegram ID, majburiy.
+- `DB_PATH` — `/var/data/market_database.sqlite3`, Render diskka ulangan.
+- `BACKUP_DIR` — `/var/data/backups`, zaxira nusxalari shu yerda.
+- `AI_API_KEY` — ixtiyoriy, faqat AI moderatsiya yoqilgan bo'lsa kerak.
+
+Render'da `.env` faylini yuklash shart emas. Render Dashboard → **Environment** orqali maxfiy qiymatlarni kiriting; ular GitHub'ga yozilmaydi.
 
 ## ⚙️ Bot qanday ishlaydi
 
@@ -356,3 +378,20 @@ bilan qo'shadi va bu amal idempotent.
 Zaxira nusxalar `BACKUP_DIR` (sukut: `backups/`) ichida
 `market_backup_YYYY-MM-DD_HH-MM-SS.sqlite3` ko'rinishida saqlanadi va
 `BACKUP_KEEP` tadan ortig'i avtomatik o'chiriladi.
+
+### Bazani tiklash
+
+Admin panelidagi **♻️ Bazani tiklash** tugmasi orqali Telegram'dan `.sqlite3`
+backup faylini yuklash mumkin. Bot faylni SQLite signature, `PRAGMA
+integrity_check` va asosiy jadvallar (`settings`, `users`, `listings`) bo'yicha
+tekshiradi. Faqat tekshiruvdan o'tgan faylga tasdiqlash oynasi ko'rsatiladi.
+
+Tasdiqlashdan oldin joriy baza `market_database.sqlite3.pre_restore_...`
+nomi bilan zaxiralanadi. Baza fayli atomik almashtiriladi; yangi fayl ochilmasa
+yoki sxema mos kelmasa, avvalgi baza qaytariladi. Tiklash muvaffaqiyatli
+bo'lsa, bot sozlamalari va adminlar ro'yxati qayta o'qiladi.
+
+> ⚠️ Tiklash joriy bazadagi barcha foydalanuvchi, e'lon, taklif va bitim
+> ma'lumotlarini almashtiradi. Faqat ishonchli va to'g'ri nusxani yuklang.
+> Render'dagi disk vaqtincha bo'lsa, eng muhim zaxiralarni Telegram'dan
+> tashqarida ham saqlang.

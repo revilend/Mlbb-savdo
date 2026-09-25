@@ -690,7 +690,7 @@ async def edit_contact_apply(message: Message, state: FSMContext, bot: Bot) -> N
     )
 
 
-@router.message(EditFSM)
+@router.message(StateFilter(EditFSM))
 async def edit_fallback(message: Message) -> None:
     """Tahrirlash bosqichida noto'g'ri xabar."""
     await message.answer(

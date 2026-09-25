@@ -1,231 +1,244 @@
-"""Akkaunt narxini hisoblash (CalcFSM).
+"""Akkauntni admin yordamida baholash.
 
-Rank va skin toifalari asosida Oʻzbekiston bozori uchun real narx oraligʻi
-hisoblab beriladi.
+Foydalanuvchi skrinshotlarni yuboradi, bot ularni asosiy admin'ga
+baholash uchun yuboradi va admin'ning javobini foydalanuvchiga yetkazadi.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 
-from handlers.common import esc, format_price, menu_button_guard
-from keyboards import BTN_CALC, RANKS, cancel_kb, main_menu_kb, rank_kb
-from states import CalcFSM
+import config
+from database import db
+from handlers.common import esc
+from keyboards import (
+    BTN_APPRAISAL,
+    BTN_DONE,
+    appraisal_answer_kb,
+    cancel_kb,
+    main_menu_kb,
+    photos_kb,
+)
+from states import AdminFSM, AppraisalFSM
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="calculator")
 
-# Rank bo'yicha bazaviy narx (soʻm)
-RANK_BASE_PRICE: dict[str, int] = {
-    "Mythic Glory": 4_500_000,
-    "Mythic": 2_200_000,
-    "Legend": 1_100_000,
-    "Epic": 550_000,
-    "Grandmaster": 300_000,
-    "Master va undan past": 120_000,
-}
-DEFAULT_RANK_PRICE = 250_000
+MAX_APPRAISAL_PHOTOS = 5
 
-# Skin toifalari bo'yicha qoʻshimcha qiymat (soʻm)
-COLLECTOR_VALUE = 220_000
-LEGEND_VALUE = 320_000
-EPIC_VALUE = 65_000
-
-# Hisoblangan narxga qoʻllaniladigan koeffitsiyentlar
-LOW_FACTOR = 0.82
-HIGH_FACTOR = 1.22
-
-INTRO_TEXT = (
-    "🧮 <b>Akkaunt narx kalkulyatori</b>\n\n"
-    "Bir necha savolga javob bering — akkauntingizning real bozor narxini "
-    "hisoblab beraman.\n\n"
-    "Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing."
+APPRAISAL_PROMPT = (
+    "📸 <b>Akkauntingizni baholatish</b>\n\n"
+    "Akkauntingizning asosiy skrinshotlarini (Profil, Kolleksiya va qimmat "
+    "skins) yuboring (1 dan 5 tagacha). Tugagach «✅ Tayyor» tugmasini bosing."
 )
 
-RANK_ASK = "1️⃣ <b>Akkauntning ranki qanday?</b>"
-COLLECTOR_ASK = (
-    "2️⃣ <b>Nechta Collector skin bor?</b>\n\n"
-    "Faqat raqam yozing. Agar yoʻq boʻlsa <code>0</code> yuboring."
-)
-LEGEND_ASK = (
-    "3️⃣ <b>Nechta Legend skin bor?</b>\n\n"
-    "Faqat raqam yozing. Agar yoʻq boʻlsa <code>0</code> yuboring."
-)
-EPIC_ASK = (
-    "4️⃣ <b>Nechta Epic skin bor?</b>\n\n"
-    "Faqat raqam yozing. Agar yoʻq boʻlsa <code>0</code> yuboring."
+APPRAISAL_ADMIN_CAPTION = (
+    "📊 <b>YANGI AKKAUNT BAHOLASH SOʻROVI</b>\n"
+    "👤 Foydalanuvchi: @{username} (ID: {user_id})"
 )
 
+APPRAISAL_SENT = (
+    "✅ Skrinshotlar adminga yuborildi. Tez orada sizga akkauntingizning "
+    "real bozor narxi aytiladi!"
+)
 
-def _parse_count(text: str, limit: int = 2000) -> int | None:
-    """Matndan sonni ajratadi (0 ham to'g'ri javob)."""
-    if text is None:
-        return None
-    digits = re.sub(r"\D", "", text)
-    if not digits:
-        return None
-    value = int(digits)
-    if value > limit:
-        return None
-    return value
+APPRAISAL_FAILED = (
+    "⚠️ Skrinshotlarni adminga yuborib boʻlmadi. Iltimos, yana urinib koʻring."
+)
+
+ADMIN_PRICE_PROMPT = "Ushbu akkaunt uchun narx va izohni yozing:"
 
 
-def _estimate(rank: str, collector: int, legend: int, epic: int) -> tuple[int, int, int]:
-    """(pastki, oʻrta, yuqori) narx oraligʻini hisoblaydi."""
-    base = RANK_BASE_PRICE.get(rank, DEFAULT_RANK_PRICE)
-    total = base + collector * COLLECTOR_VALUE + legend * LEGEND_VALUE + epic * EPIC_VALUE
-    low = int(total * LOW_FACTOR // 10_000 * 10_000)
-    middle = int(total // 10_000 * 10_000)
-    high = int(total * HIGH_FACTOR // 10_000 * 10_000)
-    return max(low, 10_000), middle, high
+def _admin_caption(user: Message) -> str:
+    """Admin uchun xavfsiz, matnli soʻrov sarlavhasi."""
+    username = user.from_user.username if user.from_user else None
+    display_username = username or "username_yoq"
+    return APPRAISAL_ADMIN_CAPTION.format(
+        username=esc(display_username), user_id=user.from_user.id
+    )
 
 
-@router.message(StateFilter(None), F.text == BTN_CALC)
-async def start_calc(message: Message, state: FSMContext) -> None:
-    """Kalkulyatorni boshlaydi."""
+async def _send_to_admin(
+    bot: Bot,
+    user: Message,
+    photos: list[str],
+) -> None:
+    """Skrinshotlarni primary admin'ga baholash uchun yuboradi."""
+    admin_id = int(config.ADMIN_ID or 0)
+    if not admin_id:
+        admins = db.get_admin_ids()
+        admin_id = int(admins[0]) if admins else 0
+    if not admin_id:
+        raise TelegramAPIError("ADMIN_ID sozlanmagan")
+
+    caption = _admin_caption(user)
+    markup = appraisal_answer_kb(user.from_user.id)
+
+    if len(photos) == 1:
+        await bot.send_photo(
+            admin_id,
+            photos[0],
+            caption=caption,
+            reply_markup=markup,
+        )
+        return
+
+    media = [
+        InputMediaPhoto(media=file_id, caption=caption if index == 0 else None)
+        for index, file_id in enumerate(photos)
+    ]
+    await bot.send_media_group(chat_id=admin_id, media=media)
+    # Telegram media guruhiga inline tugma biriktirishga ruxsat bermaydi.
+    await bot.send_message(
+        admin_id,
+        "📸 <b>Skrinshotlar tayyor.</b> Quyidagi tugma orqali bahoni yozing:",
+        reply_markup=markup,
+    )
+
+
+@router.message(StateFilter(None), F.text == BTN_APPRAISAL)
+async def start_appraisal(message: Message, state: FSMContext) -> None:
+    """Baholash uchun skrinshotlarni yig'ishni boshlaydi."""
     await state.clear()
-    await state.set_state(CalcFSM.rank)
-    await message.answer(INTRO_TEXT, reply_markup=cancel_kb())
-    await message.answer(RANK_ASK, reply_markup=rank_kb("crank"))
+    await state.set_state(AppraisalFSM.photos)
+    await message.answer(APPRAISAL_PROMPT, reply_markup=photos_kb())
 
 
-@router.callback_query(CalcFSM.rank, F.data.startswith("crank_"))
-async def calc_rank_cb(callback: CallbackQuery, state: FSMContext) -> None:
-    """Rank tugma orqali tanlandi."""
-    value = (callback.data or "").split("_", 1)[-1]
-
-    if value == "custom":
-        await callback.answer()
-        if isinstance(callback.message, Message):
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)
-                await callback.message.edit_text(
-                    "✍️ Rank nomini yozib yuboring.\n\nMasalan: <i>Mythic Glory</i>"
-                )
-            except TelegramAPIError:
-                pass
+@router.message(AppraisalFSM.photos, F.photo)
+async def collect_appraisal_photo(message: Message, state: FSMContext) -> None:
+    """Foydalanuvchining skrinshotlarini 1–5 tagacha jamlaydi."""
+    data = await state.get_data()
+    photos = list(data.get("photos") or [])
+    if len(photos) >= MAX_APPRAISAL_PHOTOS:
+        await message.answer(
+            "📸 maksimal 5 ta skrinshot qabul qilindi. Endi «✅ Tayyor» "
+            "tugmasini bosing."
+        )
         return
 
-    if not value.isdigit() or int(value) >= len(RANKS):
-        await callback.answer("❌ Notoʻgʻri tanlov.", show_alert=True)
+    photo = message.photo[-1] if message.photo else None
+    if photo is None or not photo.file_id:
+        await message.answer("❌ Skrinshotni Telegram orqali yubiring.")
         return
 
-    rank = RANKS[int(value)]
-    await state.update_data(rank=rank)
-    await callback.answer(f"Tanlandi: {rank}")
+    photos.append(photo.file_id)
+    await state.update_data(photos=photos)
+    remaining = MAX_APPRAISAL_PHOTOS - len(photos)
+    suffix = (
+        f" Yana {remaining} ta skrinshot yuborishingiz mumkin."
+        if remaining
+        else " Endi «✅ Tayyor» tugmasini bosing."
+    )
+    await message.answer(f"📸 Skrinshot qabul qilindi ({len(photos)}/5).{suffix}")
+
+
+@router.message(AppraisalFSM.photos, F.text == BTN_DONE)
+async def finish_appraisal(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Skrinshotlarni adminga yuboradi va foydalanuvchini kutishga o'tkazadi."""
+    data = await state.get_data()
+    photos = list(data.get("photos") or [])[:MAX_APPRAISAL_PHOTOS]
+    if not photos:
+        await message.answer(
+            "📸 Avval kamida bitta skrinshot yuboring, keyin «✅ Tayyor» bosing.",
+            reply_markup=photos_kb(),
+        )
+        return
+
+    try:
+        await _send_to_admin(bot, message, photos)
+    except TelegramAPIError as exc:
+        logger.warning("Baholash soʻrovini adminga yuborib boʻlmadi: %s", exc)
+        await message.answer(APPRAISAL_FAILED, reply_markup=photos_kb())
+        return
+
+    await state.clear()
+    await message.answer(APPRAISAL_SENT, reply_markup=main_menu_kb())
+
+
+@router.message(AppraisalFSM.photos, F.text)
+async def appraisal_waiting_photo(message: Message) -> None:
+    """Skrinshot bosqichidagi noto'g'ri matnni qayta ishlaydi."""
+    await message.answer(
+        "📸 Iltimos, skrinshot yuboring. Tugagach «✅ Tayyor» tugmasini bosing.",
+        reply_markup=photos_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("eval_ans_"))
+async def admin_valuation_request(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Admin baholash javobini kiritish rejimiga o'tadi."""
+    if not db.is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Bu amal faqat administrator uchun.", show_alert=True)
+        return
+
+    raw_target = (callback.data or "").split("_", 2)[-1]
+    if not raw_target.isdigit() or int(raw_target) <= 0:
+        await callback.answer("❌ Notoʻgʻri foydalanuvchi ID.", show_alert=True)
+        return
+
+    target_user_id = int(raw_target)
+    await state.clear()
+    await state.set_state(AdminFSM.waiting_eval_price)
+    await state.update_data(target_user_id=target_user_id)
+    await callback.answer("✍️ Bahoni yozing.")
 
     if isinstance(callback.message, Message):
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except TelegramAPIError:
-            pass
-        await state.set_state(CalcFSM.collector_count)
-        await callback.message.answer(COLLECTOR_ASK)
+        await callback.message.answer(
+            f"{ADMIN_PRICE_PROMPT}\n\n"
+            f"👤 Foydalanuvchi ID: <code>{target_user_id}</code>",
+            reply_markup=cancel_kb(),
+        )
 
 
-@router.message(CalcFSM.rank, F.text)
-async def calc_rank_text(message: Message, state: FSMContext) -> None:
-    """Rank matn orqali kiritildi."""
-    if menu_button_guard(message):
-        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
+@router.message(AdminFSM.waiting_eval_price, F.text)
+async def send_admin_valuation(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    """Admin bahosini foydalanuvchiga yuboradi."""
+    if not db.is_admin(message.from_user.id if message.from_user else None):
         return
 
-    rank = (message.text or "").strip()
-    if len(rank) < 2:
-        await message.answer("❌ Rank juda qisqa. Masalan: <i>Mythic Glory</i>")
-        return
-
-    await state.update_data(rank=rank[:60])
-    await state.set_state(CalcFSM.collector_count)
-    await message.answer(COLLECTOR_ASK)
-
-
-@router.message(CalcFSM.collector_count, F.text)
-async def calc_collector(message: Message, state: FSMContext) -> None:
-    """Collector skinlar soni."""
-    if menu_button_guard(message):
-        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
-        return
-
-    count = _parse_count(message.text or "")
-    if count is None:
-        await message.answer("❌ Iltimos, faqat raqam yozing (masalan: <code>8</code> yoki <code>0</code>).")
-        return
-
-    await state.update_data(collector_count=count)
-    await state.set_state(CalcFSM.legend_count)
-    await message.answer(LEGEND_ASK)
-
-
-@router.message(CalcFSM.legend_count, F.text)
-async def calc_legend(message: Message, state: FSMContext) -> None:
-    """Legend skinlar soni."""
-    if menu_button_guard(message):
-        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
-        return
-
-    count = _parse_count(message.text or "")
-    if count is None:
-        await message.answer("❌ Iltimos, faqat raqam yozing (masalan: <code>2</code> yoki <code>0</code>).")
-        return
-
-    await state.update_data(legend_count=count)
-    await state.set_state(CalcFSM.epic_count)
-    await message.answer(EPIC_ASK)
-
-
-@router.message(CalcFSM.epic_count, F.text)
-async def calc_epic(message: Message, state: FSMContext) -> None:
-    """Epic skinlar soni va yakuniy hisob-kitob."""
-    if menu_button_guard(message):
-        await message.answer("ℹ️ Avval joriy amalni yakunlang yoki «❌ Bekor qilish» tugmasini bosing.")
-        return
-
-    count = _parse_count(message.text or "")
-    if count is None:
-        await message.answer("❌ Iltimos, faqat raqam yozing (masalan: <code>15</code> yoki <code>0</code>).")
+    admin_text = (message.text or "").strip()
+    if not admin_text:
+        await message.answer("❌ Narx va izohni yozing.", reply_markup=cancel_kb())
         return
 
     data = await state.get_data()
-    rank = str(data.get("rank") or "Nomaʼlum")
-    collector = int(data.get("collector_count") or 0)
-    legend = int(data.get("legend_count") or 0)
-    epic = count
+    raw_target = data.get("target_user_id")
+    try:
+        target_user_id = int(raw_target or 0)
+    except (TypeError, ValueError):
+        target_user_id = 0
+    if target_user_id <= 0:
+        await state.clear()
+        await message.answer("⚠️ Foydalanuvchi topilmadi.", reply_markup=main_menu_kb())
+        return
+
+    try:
+        await bot.send_message(
+            target_user_id,
+            "🎯 <b>Akkauntingiz admin tomonidan baholandi!</b>\n\n"
+            f"💰 <b>Tavsiya etilgan narx:</b>\n{esc(admin_text)}\n\n"
+            "Akkauntni sotish uchun menyudan <b>«💰 Akkaunt sotish»</b> "
+            "boʻlimiga kiring!",
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Admin bahosi yuborilmadi (user=%s): %s", target_user_id, exc)
+        await state.clear()
+        await message.answer("❌ Foydalanuvchiga javob yuborib boʻlmadi.")
+        return
 
     await state.clear()
-
-    low, middle, high = _estimate(rank, collector, legend, epic)
-
-    tips: list[str] = []
-    if collector == 0 and legend == 0:
-        tips.append("Collector va Legend skinlar narxni sezilarli oshiradi — ularni alohida koʻrsating.")
-    if collector >= 5:
-        tips.append("Kollektsiyangiz kuchli — eʼlonda collector skinlar roʻyxatini alohida yozing.")
-    if "glory" in rank.lower():
-        tips.append("Mythic Glory akkauntlar talabgir — narxni pastga tushirmaslikka harakat qiling.")
-    tips.append("Akkauntni faqat garant xizmati orqali soting — bu sizni firibgarlikdan himoya qiladi.")
-    tips.append("Eʼlonda email va telefon bogʻlanishi holatini aniq koʻrsating.")
-
-    text = (
-        "🧮 <b>Narx hisob-kitobi tayyor!</b>\n\n"
-        f"🏆 Rank: <b>{esc(rank)}</b>\n"
-        f"💎 Collector skin: <b>{collector}</b>\n"
-        f"👑 Legend skin: <b>{legend}</b>\n"
-        f"✨ Epic skin: <b>{epic}</b>\n\n"
-        "💰 <b>Bozor narxi oraligʻi:</b>\n"
-        f"🟢 Pastki chegara: <b>{esc(format_price(low))}</b>\n"
-        f"🟡 Oʻrtacha narx: <b>{esc(format_price(middle))}</b>\n"
-        f"🔴 Yuqori chegara: <b>{esc(format_price(high))}</b>\n\n"
-        "💡 <b>Tavsiyalar</b>\n"
-        + "\n".join(f"• {esc(tip)}" for tip in tips)
-    )
-
-    await message.answer(text, reply_markup=main_menu_kb())
+    await message.answer("✅ Javobingiz foydalanuvchiga yuborildi.")

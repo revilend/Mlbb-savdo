@@ -1,0 +1,45 @@
+services:
+  - type: worker
+    name: mlbb-market-bot
+    runtime: python
+    plan: 1c-2g
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DEFAULT_CHANNEL_ID
+        value: @mlbb_savdo
+      - key: GARANT_USERNAME
+        value: my_garant
+      - key: DB_PATH
+        value: /var/data/market_database.sqlite3
+      - key: BACKUP_DIR
+        value: /var/data/backups
+      - key: TZ_OFFSET_HOURS
+        value: "5"
+      - key: DIGEST_HOUR
+        value: "23"
+      - key: DIGEST_MINUTE
+        value: "59"
+      - key: BACKUP_ENABLED
+        value: "true"
+      - key: BACKUP_KEEP
+        value: "7"
+      - key: AI_ENABLED
+        value: "false"
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: AI_MODEL
+        value: openai/gpt-4o-mini
+    disk:
+      name: mlbb-market-data
+      mountPath: /var/data
+      sizeGB: 1

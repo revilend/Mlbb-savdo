@@ -13,6 +13,7 @@ Barcha testlar tarmoqqa murojaat qilmaydi.
 from __future__ import annotations
 
 import json
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,6 +27,7 @@ import ai
 import config
 import keyboards
 from database import db
+from handlers.admin import adm_restore_start
 from handlers.admin import adm_ai, adm_ai_toggle, ai_check_cb
 from handlers.moderation import ai_moderate_listing, manual_ai_check
 from handlers.sell import sell_finish, sell_price
@@ -51,7 +53,7 @@ from keyboards import (
     settings_items_kb,
 )
 from settings import GROUPS, SPEC, SettingsError, mask_secret, settings, validate
-from states import SellFSM, SettingsFSM
+from states import AdminFSM, SellFSM, SettingsFSM
 
 from conftest import ADMIN_ID, USER_ID, make_callback, make_message, make_user
 
@@ -1182,6 +1184,56 @@ async def test_ai_check_handler_removes_buttons_when_auto(test_db, fake_bot, mon
 
     assert message_edits.edit_text.await_args.kwargs["reply_markup"] is None
     assert "AI avtomatik tasdiqladi" in message_edits.edit_text.await_args.args[0]
+
+
+# ---------------------------------------------------------------------------
+# Restore testlari
+# ---------------------------------------------------------------------------
+async def test_restore_valid_sqlite_backup(test_db, tmp_path):
+    """Valid backup faylni atomik tiklash va joriy bazani almashtirish."""
+    backup_path = tmp_path / "backup.sqlite3"
+    assert await db.backup_to(str(backup_path))
+
+    await db.add_user(999, "new_user", "Yangi foydalanuvchi")
+    with sqlite3.connect(backup_path) as conn:
+        conn.execute("DELETE FROM users WHERE user_id = 999")
+        conn.commit()
+
+    ok, safety_path = await db.restore_from(str(backup_path))
+    assert ok is True
+    assert safety_path
+    assert await db.get_user(999) is None
+
+
+async def test_restore_rejects_non_sqlite_file(test_db, tmp_path):
+    """Noto'g'ri fayl tiklashdan oldin rad etiladi."""
+    invalid = tmp_path / "invalid.sqlite3"
+    invalid.write_text("not a database " + ("x" * 40), encoding="utf-8")
+
+    ok, reason = await db.restore_from(str(invalid))
+    assert ok is False
+    assert "SQLite" in reason
+
+
+async def test_restore_button_is_admin_only(callback_answer):
+    """Restore tugmasi faqat admin uchun boshqariladi."""
+    callback = make_callback(user=make_user(USER_ID), data="adm_restore")
+    state = FSMContext(
+        storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=USER_ID, user_id=USER_ID)
+    )
+    await adm_restore_start(callback, state)
+    callback_answer.assert_awaited_once()
+    assert await state.get_state() is None
+
+
+def test_admin_panel_has_restore_button():
+    callbacks = {
+        button.callback_data
+        for row in admin_panel_kb().inline_keyboard
+        for button in row
+    }
+    assert "adm_backup" in callbacks
+    assert "adm_restore" in callbacks
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,10 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import aiosqlite
@@ -21,7 +24,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "market_database.sqlite3"
+DB_PATH = config.DB_PATH
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -224,6 +227,7 @@ class Database:
     def __init__(self, path: str = DB_PATH) -> None:
         self.path = path
         self._conn: Optional[aiosqlite.Connection] = None
+        self.restore_lock = asyncio.Lock()
         # Jonli to'plam: anti-flood middleware shu obyektga havola saqlaydi,
         # shuning uchun admin qo'shilganda/o'chirilganda u avtomatik yangilanadi.
         self.admin_ids: set[int] = {int(config.ADMIN_ID)} if config.ADMIN_ID else set()
@@ -1410,6 +1414,108 @@ class Database:
         except OSError as exc:
             logger.error("Baza nusxasini saqlab boʻlmadi: %s", exc)
             return False
+
+    async def validate_restore_file(self, source_path: str) -> tuple[bool, str]:
+        """Tiklash uchun yuklangan faylning SQLite va sxema mosligini tekshiradi."""
+        path = Path(source_path).expanduser()
+        try:
+            if not path.is_file():
+                return False, "Fayl topilmadi."
+            if path.stat().st_size < 32:
+                return False, "Fayl juda kichik yoki boʻsh."
+            with path.open("rb") as source:
+                if source.read(16) != b"SQLite format 3\x00":
+                    return False, "Fayl SQLite maʼlumotlar bazasi emas."
+        except OSError as exc:
+            return False, f"Faylni tekshirib boʻlmadi: {exc}"
+
+        def _check() -> tuple[bool, str]:
+            try:
+                uri = f"file:{path.resolve().as_posix()}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+                    result = conn.execute("PRAGMA integrity_check").fetchone()
+                    if not result or str(result[0]).lower() != "ok":
+                        return False, "SQLite integritet tekshiruvi muvaffaqiyatsiz."
+                    tables = {
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        )
+                    }
+                required = {"settings", "users", "listings"}
+                missing = sorted(required - tables)
+                if missing:
+                    return False, "Baza sxemasi mos emas. Yetishmayotgan jadvallar: " + ", ".join(missing)
+                return True, ""
+            except (OSError, sqlite3.Error) as exc:
+                return False, f"SQLite faylni ochib boʻlmadi: {exc}"
+
+        return await asyncio.to_thread(_check)
+
+    async def restore_from(self, source_path: str) -> tuple[bool, str]:
+        """Tasdiqlangan SQLite nusxasini atomik ravishda joriy bazaga tiklaydi.
+
+        Tiklashdan oldin joriy bazaning alohida nusxasi yaratiladi. Agar yangi
+        fayl ochilmasa yoki sxema mos kelmasa, avvalgi baza qaytariladi.
+        """
+        source = Path(source_path).expanduser()
+        async with self.restore_lock:
+            ok, reason = await self.validate_restore_file(str(source))
+            if not ok:
+                return False, reason
+            if source.resolve() == Path(self.path).resolve():
+                return False, "Tiklash fayli joriy bazaning oʻzi boʻlmasligi kerak."
+
+            if self._conn is None:
+                return False, "Maʼlumotlar bazasi ulanmagan."
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            safety_path = f"{self.path}.pre_restore_{stamp}"
+            if not await self.backup_to(safety_path):
+                return False, "Tiklashdan oldin xavfsizlik nusxasi yaratib boʻlmadi."
+
+            await self.close()
+            staged_path: Optional[str] = None
+            replaced = False
+            try:
+                parent = Path(self.path).resolve().parent
+                parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    prefix="restore_", suffix=".sqlite3", dir=parent, delete=False
+                ) as staged:
+                    staged_path = staged.name
+                await asyncio.to_thread(shutil.copy2, source, staged_path)
+                os.replace(staged_path, self.path)
+                staged_path = None
+                replaced = True
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        os.remove(self.path + suffix)
+                    except FileNotFoundError:
+                        pass
+                await self.connect()
+                return True, safety_path
+            except Exception as exc:
+                logger.exception("Bazani tiklashda xatolik")
+                try:
+                    await self.close()
+                except Exception:
+                    logger.exception("Tiklashdan keyin bazani yopib boʻlmadi")
+                if replaced:
+                    try:
+                        os.replace(safety_path, self.path)
+                    except OSError:
+                        logger.exception("Xavfsizlik nusxasini qaytarib boʻlmadi")
+                try:
+                    await self.connect()
+                except Exception:
+                    logger.exception("Tiklashdan keyin bazani ulab boʻlmadi")
+                return False, f"Tiklash yakunlanmadi: {exc}"
+            finally:
+                if staged_path:
+                    try:
+                        os.remove(staged_path)
+                    except OSError:
+                        pass
 
     # ------------------------------------------------------------------- stats
     async def get_stats(self) -> tuple[int, int, int]:

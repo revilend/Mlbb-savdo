@@ -65,7 +65,9 @@ BTN_SELL = "💰 Akkaunt sotish"
 BTN_RANDOM = "🎲 Tasodifiy akkaunt"
 BTN_PRICE_FILTER = "💵 Narx boʻyicha saralash"
 BTN_FAVORITES = "⭐️ Sevimlilarim"
-BTN_CALC = "🧮 Narx kalkulyatori"
+BTN_APPRAISAL = "🔍 Akkauntni baholatish"
+# Eski nom saqlanadi: boshqa kengaytmalar import qilsa ham, menyu matni yangilangan bo'lib qoladi.
+BTN_CALC = BTN_APPRAISAL
 BTN_SCAM = "🛡️ Firibgarni tekshirish"
 BTN_MY_LISTINGS = "📋 Mening eʼlonlarim"
 BTN_INBOX = "📥 Takliflar va bitimlar"
@@ -81,7 +83,7 @@ BTN_DONE = "✅ Tayyor"
 MAIN_MENU_ROWS: list[list[str]] = [
     [BTN_SEARCH, BTN_SELL],
     [BTN_RANDOM, BTN_PRICE_FILTER],
-    [BTN_FAVORITES, BTN_CALC],
+    [BTN_FAVORITES, BTN_APPRAISAL],
     [BTN_SCAM, BTN_MY_LISTINGS],
     [BTN_INBOX, BTN_SAVED_SEARCH],
     [BTN_REFERRAL, BTN_GARANT],
@@ -203,6 +205,20 @@ def subscribe_kb(channel_link: str = "") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Aʼzo boʻldim", callback_data="check_sub_cb")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def appraisal_answer_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Admin uchun akkaunt baholash javobini kiritish tugmasi."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✍️ Narx aytish (Javob berish)",
+                    callback_data=f"eval_ans_{int(user_id)}",
+                )
+            ]
+        ]
+    )
 
 
 def sell_mode_kb() -> InlineKeyboardMarkup:
@@ -406,6 +422,7 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📈 Analitika", callback_data="adm_analytics"),
                 InlineKeyboardButton(text="💾 Zaxira nusxa", callback_data="adm_backup"),
             ],
+            [InlineKeyboardButton(text="♻️ Bazani tiklash", callback_data="adm_restore")],
         ]
     )
 

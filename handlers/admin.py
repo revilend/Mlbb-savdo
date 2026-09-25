@@ -9,13 +9,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 import ai
 import config
@@ -549,6 +556,148 @@ async def adm_backup(callback: CallbackQuery, bot: Bot) -> None:
         logger.error("Zaxira nusxasini yuborib boʻlmadi: %s", exc)
         if isinstance(callback.message, Message):
             await callback.message.answer(f"❌ Faylni yuborib boʻlmadi: {esc(exc)}")
+
+
+@router.callback_query(F.data == "adm_restore")
+async def adm_restore_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Tiklash uchun admin panelidan fayl yuklash bosqichini boshlaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+
+    await state.clear()
+    await state.set_state(AdminFSM.restore_waiting_document)
+    await callback.answer("Fayl yuklashga tayyor.")
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "♻️ <b>Bazani tiklash</b>\n\n"
+            "Avval bot yaratgan <code>.sqlite3</code> zaxira faylni shu yerga "
+            "yuboring. Fayl avval tekshiriladi, keyin esa alohida tasdiqlash "
+            "soʻraladi.\n\n"
+            "⚠️ Tiklash barcha joriy maʼlumotlarni almashtiradi. "
+            "Notoʻgʻri fayl yuborilmasin.\n\n"
+            "Bekor qilish uchun «❌ Bekor qilish» tugmasini bosing.",
+            reply_markup=cancel_kb(),
+        )
+
+
+@router.message(AdminFSM.restore_waiting_document, F.document)
+async def adm_restore_document(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Telegram'dan yuklangan backup faylini tekshiradi va tasdiqlashga yuboradi."""
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    document = message.document
+    if document is None or not document.file_id:
+        await message.answer("❌ SQLite backup faylini yuboring.", reply_markup=cancel_kb())
+        return
+
+    backup_dir = str(settings.get("BACKUP_DIR"))
+    os.makedirs(backup_dir, exist_ok=True)
+    fd, staged_path = tempfile.mkstemp(
+        prefix="restore_upload_", suffix=".sqlite3", dir=backup_dir
+    )
+    os.close(fd)
+    try:
+        await bot.download(document.file_id, destination=staged_path)
+        valid, reason = await db.validate_restore_file(staged_path)
+        if not valid:
+            await message.answer(f"❌ <b>Fayl rad etildi.</b>\n\n{esc(reason)}", reply_markup=cancel_kb())
+            await state.clear()
+            return
+
+        size_kb = max(1, os.path.getsize(staged_path) // 1024)
+        await state.set_state(AdminFSM.restore_waiting_confirm)
+        await state.update_data(restore_path=staged_path)
+        await message.answer(
+            "✅ <b>Fayl tekshiruvdan oʻtdi.</b>\n\n"
+            f"📦 Hajmi: <b>{size_kb} KB</b>\n\n"
+            "⚠️ <b>Diqqat:</b> tiklash joriy bazadagi barcha eʼlon, foydalanuvchi, "
+            "taklif va bitim maʼlumotlarini almashtiradi.\n\n"
+            "Albatta davom etasizmi?",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Ha, tiklash", callback_data="adm_restore_confirm"),
+                        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="adm_restore_cancel"),
+                    ]
+                ]
+            ),
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Restore faylini yuklab boʻlmadi: %s", exc)
+        await message.answer(f"❌ Faylni yuklab boʻlmadi: {esc(exc)}", reply_markup=cancel_kb())
+        await state.clear()
+    except OSError as exc:
+        logger.warning("Restore faylini saqlab boʻlmadi: %s", exc)
+        await message.answer("❌ Faylni serverga saqlab boʻlmadi.", reply_markup=cancel_kb())
+        await state.clear()
+    except Exception:
+        logger.exception("Restore faylini tayyorlashda xatolik")
+        await message.answer("❌ Faylni tekshirishda xatolik yuz berdi.", reply_markup=cancel_kb())
+        await state.clear()
+    finally:
+        if await state.get_state() != AdminFSM.restore_waiting_confirm:
+            try:
+                os.remove(staged_path)
+            except OSError:
+                pass
+
+
+@router.callback_query(F.data == "adm_restore_cancel")
+async def adm_restore_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Yuklangan tiklash faylini oʻchirib, admin paneldan chiqadi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+    data = await state.get_data()
+    staged_path = str(data.get("restore_path") or "")
+    await state.clear()
+    if staged_path:
+        try:
+            os.remove(staged_path)
+        except OSError:
+            pass
+    await callback.answer("Bekor qilindi.")
+    if isinstance(callback.message, Message):
+        try:
+            await callback.message.edit_text("✅ Tiklash bekor qilindi.", reply_markup=admin_panel_kb())
+        except TelegramAPIError:
+            await callback.message.answer("✅ Tiklash bekor qilindi.", reply_markup=admin_panel_kb())
+
+
+@router.callback_query(F.data == "adm_restore_confirm")
+async def adm_restore_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    """Tasdiqlangan faylni bazaga tiklaydi va sozlamalarni qayta yuklaydi."""
+    if not is_admin(callback.from_user.id):
+        await _deny(callback)
+        return
+    data = await state.get_data()
+    staged_path = str(data.get("restore_path") or "")
+    if not staged_path or not os.path.isfile(staged_path):
+        await state.clear()
+        await callback.answer("Fayl topilmadi. Qayta yuklang.", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer("Baza tiklanmoqda…")
+    ok, result = await db.restore_from(staged_path)
+    try:
+        os.remove(staged_path)
+    except OSError:
+        pass
+    if not ok:
+        if isinstance(callback.message, Message):
+            await callback.message.answer(f"❌ <b>Baza tiklanmadi.</b>\n\n{esc(result)}", reply_markup=admin_panel_kb())
+        return
+
+    settings.load(await db.get_settings_by_prefix(settings.PREFIX))
+    await db.refresh_admins()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "✅ <b>Maʼlumotlar bazasi tiklandi.</b>\n\n"
+            "Joriy sozlamalar va adminlar roʻyxati qayta yuklandi.",
+            reply_markup=admin_panel_kb(),
+        )
 
 
 @router.callback_query(F.data.startswith("dstat_"))

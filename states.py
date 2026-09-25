@@ -68,13 +68,10 @@ class SettingsFSM(StatesGroup):
     waiting_value = State()
 
 
-class CalcFSM(StatesGroup):
-    """Akkaunt narxini hisoblash."""
+class AppraisalFSM(StatesGroup):
+    """Akkaunt skrinshotlarini yig'ib admin baholashga yuborish."""
 
-    rank = State()
-    collector_count = State()
-    legend_count = State()
-    epic_count = State()
+    photos = State()
 
 
 class ScamCheckFSM(StatesGroup):
@@ -94,3 +91,6 @@ class AdminFSM(StatesGroup):
     send_direct_msg_text = State()
     ban_identifier = State()
     ban_reason = State()
+    restore_waiting_document = State()
+    restore_waiting_confirm = State()
+    waiting_eval_price = State()  # target_user_id admin bahosi uchun
