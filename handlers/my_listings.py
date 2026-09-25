@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 import config
 from database import db
@@ -16,6 +22,7 @@ from handlers.common import (
     edit_listing_card,
     esc,
     format_price,
+    format_rating,
     get_channel_id,
     is_bump_available,
     is_trade,
@@ -57,7 +64,22 @@ async def show_my_listings(message: Message, bot: Bot) -> None:
         )
         return
 
-    await message.answer(f"📋 <b>Mening eʼlonlarim</b> — jami {len(listings)} ta.")
+    stats = await db.get_seller_stats(message.from_user.id)
+    await message.answer(
+        f"📋 <b>Mening eʼlonlarim</b> — jami {len(listings)} ta.\n\n"
+        f"⭐️ <b>Sizning reytingiz: {esc(format_rating(stats['rating'], stats['reviews']))}</b>\n"
+        f"✅ Sotilgan: <b>{stats['sold']}</b> · 🟢 Faol: <b>{stats['active']}</b>",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="👤 Reytingim va statistikam",
+                        callback_data=f"sp_{message.from_user.id}",
+                    )
+                ]
+            ]
+        ),
+    )
 
     for listing in listings[:MAX_SHOWN]:
         status = str(listing.get("status") or "pending")
@@ -137,6 +159,27 @@ async def mark_as_sold(callback: CallbackQuery, bot: Bot) -> None:
             f"📌 Yangi holat: {status_label(new_status)}\n"
             "Kanalda eʼlon «SOTILDI» belgisi bilan yangilandi."
         )
+
+    # Savdo yakunlandi — xaridorlarga baho qo'yishni taklif qilamiz
+    for buyer_id in await db.get_listing_buyers(listing_id):
+        with contextlib.suppress(TelegramAPIError):
+            await bot.send_message(
+                buyer_id,
+                "✅ <b>Savdo yakunlandi!</b>\n\n"
+                f"🔗 Eʼlon: <b>#{listing_id}</b>\n\n"
+                "Bitim qanday oʻtganini baholang — sizning fikringiz boshqa "
+                "xaridorlarga yordam beradi 👇",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="⭐️ Baho qoʻyish",
+                                callback_data=f"rvw_{listing_id}",
+                            )
+                        ]
+                    ]
+                ),
+            )
 
 
 @router.callback_query(F.data.startswith("bump_"))

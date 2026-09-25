@@ -76,6 +76,7 @@ BTN_REFERRAL = "🎁 Referal"
 BTN_GARANT = "🛡️ Garant xizmati"
 BTN_STATS = "📊 Statistika"
 BTN_GUIDE = "❓ Qoʻllanma"
+BTN_REVIEWS = "📖 Sharhlar"
 
 BTN_CANCEL = "❌ Bekor qilish"
 BTN_DONE = "✅ Tayyor"
@@ -88,6 +89,7 @@ MAIN_MENU_ROWS: list[list[str]] = [
     [BTN_INBOX, BTN_SAVED_SEARCH],
     [BTN_REFERRAL, BTN_GARANT],
     [BTN_STATS, BTN_GUIDE],
+    [BTN_REVIEWS],
 ]
 
 ALL_MENU_BUTTONS: set[str] = {button for row in MAIN_MENU_ROWS for button in row}
@@ -268,12 +270,29 @@ def listing_action_kb(listing: dict[str, Any]) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔎 Oʻxshash eʼlonlar", callback_data=f"sim_{listing_id}")
     ]
     if listing_type != "buy":
+        # Sharh faqat sotib olingan e'lon uchun qoldiriladi
+        if listing.get("status") == "sold":
+            extra.append(
+                InlineKeyboardButton(
+                    text="⭐️ Sharh qoldirish", callback_data=f"rvw_{listing_id}"
+                )
+            )
         extra.append(
             InlineKeyboardButton(
-                text="⭐️ Sharh qoldirish", callback_data=f"rvw_{listing_id}"
+                text="📖 Sharhlarni koʻrish",
+                callback_data=f"rvws_{int(listing.get('user_id') or 0)}",
             )
         )
     rows.append(extra)
+    if listing_type != "buy":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="👤 Sotuvchi reytingi",
+                    callback_data=f"sp_{int(listing.get('user_id') or 0)}",
+                )
+            ]
+        )
     rows.append([share_button(listing_id)])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

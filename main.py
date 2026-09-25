@@ -22,7 +22,7 @@ from aiogram.types import BotCommand
 from aiohttp import web
 
 import config
-from database import db
+from database import db, storage_report
 from handlers import (
     admin,
     calculator,
@@ -487,6 +487,14 @@ async def main() -> None:
         raise
 
     await db.connect()
+
+    # Baza doimiy diskda turib turmaganini darhol ochiq aytib beramiz —
+    # aks holda har bir redeploy'da e'lonlar yo'qoladi.
+    storage_status = storage_report(config.DB_PATH)
+    if "DOIMIY DISK ULanmagan" in storage_status:
+        logger.error("%s", storage_status)
+    else:
+        logger.info("%s", storage_status)
 
     # Bot ichidan kiritilgan sozlamalarni yuklaymiz (`.env` — standart qiymat)
     settings.load(await db.get_settings_by_prefix(settings.PREFIX))

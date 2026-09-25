@@ -471,12 +471,22 @@ async def test_expired_listing_banner(test_db):
 # 3. Klaviaturalar
 # ---------------------------------------------------------------------------
 async def test_listing_action_kb_has_similar_and_review(test_db, bot_username):
-    """Kartochkada o'xshash e'lonlar va sharh tugmalari bor."""
+    """Aktiv e'lon kartochnasida sharh tugmasi yo'q, sharhlarni ko'rish bor."""
     listing = await _make_sell_listing()
     callbacks = _callbacks(listing_action_kb(listing))
 
     assert f"sim_{listing['id']}" in callbacks
+    assert f"rvw_{listing['id']}" not in callbacks, "savdo tugagandan keyin emas"
+    assert f"rvws_{USER_ID}" in callbacks
+
+
+async def test_sold_listing_has_review_button(test_db, bot_username):
+    """Sotilgan e'lon kartochnasida baho qo'yish tugmasi chiqadi."""
+    listing = await _make_sell_listing(status="sold")
+    callbacks = _callbacks(listing_action_kb(listing))
+
     assert f"rvw_{listing['id']}" in callbacks
+    assert f"rvws_{USER_ID}" in callbacks
 
 
 async def test_buy_listing_has_no_review_button(test_db, bot_username):
@@ -569,6 +579,8 @@ async def test_review_flow_saves_and_notifies(
     listing = await _make_sell_listing(user_id=USER_ID, status="sold")
     listing_id = int(listing["id"])
     buyer = make_user(user_id=9001, username="buyer")
+    # Savdo bo'lgani uchun xaridor e'lonni xaridor sifatida olgan bo'lsin
+    await db.create_deal(listing_id=listing_id, seller_id=USER_ID, buyer_id=9001)
 
     await review_start(make_callback(user=buyer, data=f"rvw_{listing_id}"), fsm)
     assert await fsm.get_state() == ReviewFSM.rating
@@ -605,6 +617,266 @@ async def test_review_skips_comment_and_handles_missing_state(test_db, fsm, fake
     await _save_review(make_message(user=make_user(user_id=9002)), fsm, fake_bot, comment="")
     _, count = await db.get_seller_rating(USER_ID)
     assert count == 0  # reyting tanlanmagan — saqlanmaydi
+
+
+async def test_review_blocked_until_sale_completes(test_db, fsm, callback_answer):
+    """Savdo tugagandan oldin sharh qoldirib bo'lmaydi."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="active")
+    buyer = make_user(user_id=9010, username="buyer")
+
+    await review_start(make_callback(user=buyer, data=f"rvw_{listing['id']}"), fsm)
+
+    assert await fsm.get_state() is None
+    assert "savdo tugagandan keyin" in callback_answer.await_args.args[0].lower()
+
+
+async def test_review_rejects_non_buyer(test_db, fsm, callback_answer):
+    """Sotib olmagan foydalanuvchi sharh qoldira olmaydi."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    stranger = make_user(user_id=9011, username="stranger")
+
+    await review_start(make_callback(user=stranger, data=f"rvw_{listing['id']}"), fsm)
+
+    assert await fsm.get_state() is None
+    assert "xaridor sifatida olmagan" in callback_answer.await_args.args[0]
+
+
+async def test_review_rejects_cancelled_deal(test_db, fsm, callback_answer):
+    """Bekor qilingan bitim bo'yicha sharh qoldirilmaydi."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    buyer = make_user(user_id=9012, username="buyer")
+    deal_id = await db.create_deal(
+        listing_id=int(listing["id"]), seller_id=USER_ID, buyer_id=9012
+    )
+    await db.update_deal_status(deal_id, "cancelled")
+
+    await review_start(make_callback(user=buyer, data=f"rvw_{listing['id']}"), fsm)
+
+    assert await fsm.get_state() is None
+
+
+async def test_buyer_deal_and_listing_buyers(test_db):
+    """Bitimni xaridor bo'yicha va e'lon xaridorlarini topadi."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    listing_id = int(listing["id"])
+    await db.create_deal(listing_id=listing_id, seller_id=USER_ID, buyer_id=9101)
+    await db.create_deal(listing_id=listing_id, seller_id=USER_ID, buyer_id=9101)
+    await db.create_deal(listing_id=listing_id, seller_id=USER_ID, buyer_id=9102)
+
+    deal = await db.get_buyer_deal(listing_id, 9101)
+    assert deal is not None
+    assert int(deal["buyer_id"]) == 9101
+    assert await db.get_buyer_deal(listing_id, 9999) is None
+
+    assert sorted(await db.get_listing_buyers(listing_id)) == [9101, 9102]
+
+
+async def test_recent_reviews_feed_paginates(test_db):
+    """Oxirgi sharhlar ro'yxati sahifalab ko'rsatiladi."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    listing_id = int(listing["id"])
+    for index in range(7):
+        await db.add_review(listing_id, USER_ID, 9200 + index, 4, f"sharh {index}")
+
+    first = await db.get_recent_reviews(limit=5, offset=0)
+    second = await db.get_recent_reviews(limit=5, offset=5)
+    assert len(first) == 5
+    assert len(second) == 2
+    # Eng yangisi birinchi turadi
+    assert first[0]["comment"] == "sharh 6"
+
+
+async def test_reviews_menu_shows_feed(test_db, message_answer):
+    """Menyu tugmasi oxirgi sharhlarni ko'rsatadi."""
+    from handlers.reviews import reviews_menu
+    from keyboards import BTN_REVIEWS
+
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    await db.add_review(int(listing["id"]), USER_ID, 9301, 5, "Zo'r xizmat")
+
+    await reviews_menu(make_message(user=make_user(user_id=9302), text=BTN_REVIEWS))
+
+    assert "Oxirgi sharhlar" in message_answer.await_args.args[0]
+    assert "Zo'r xizmat" in message_answer.await_args.args[0]
+
+
+async def test_reviews_menu_handles_empty(test_db, message_answer):
+    """Hali sharh yo'q bo'lsa tushunarli xabar chiqadi."""
+    from handlers.reviews import reviews_menu
+    from keyboards import BTN_REVIEWS
+
+    await reviews_menu(make_message(user=make_user(user_id=9303), text=BTN_REVIEWS))
+
+    assert "Sharhlar" in message_answer.await_args.args[0]
+    assert "hech kim sharh qoldirmagan" in message_answer.await_args.args[0]
+
+
+async def test_seller_stats_counts_sales_and_reviews(test_db):
+    """Sotuvchi statistikasi: reyting, sharhlar va sotilganlar soni."""
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    await _make_sell_listing(user_id=USER_ID, status="active")
+    await db.add_review(int(listing["id"]), USER_ID, 9401, 5, "zoʻr")
+    await db.add_review(int(listing["id"]), USER_ID, 9402, 4, "yaxshi")
+
+    stats = await db.get_seller_stats(USER_ID)
+    assert stats["reviews"] == 2
+    assert stats["rating"] == 4.5
+    assert stats["sold"] == 1
+    assert stats["active"] == 1
+
+
+async def test_seller_stats_for_new_seller(test_db):
+    """Hali hech nima sotmagan sotuvchi uchun reyting yo'q."""
+    stats = await db.get_seller_stats(9501)
+    assert stats["rating"] == 0.0
+    assert stats["reviews"] == 0
+    assert stats["sold"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Doimiy disk tekshiruvi
+# ---------------------------------------------------------------------------
+def test_storage_is_persistent_false_on_shared_mount(monkeypatch):
+    """Baza kod bilan bir xil mountda bo'lsa — vaqtincha disk (ephemeral)."""
+    from database import storage_is_persistent
+
+    monkeypatch.setattr("database._longest_mount", lambda path: "/")
+    assert storage_is_persistent("/var/data/market.sqlite3") is False
+
+
+def test_storage_is_persistent_true_on_separate_disk(monkeypatch):
+    """Baza alohida mountda bo'lsa — doimiy disk ulangan."""
+    from database import storage_is_persistent
+
+    mounts = {"/var/data/market.sqlite3": "/var/data", "/opt/render/project/src": "/"}
+    monkeypatch.setattr("database._longest_mount", lambda path: mounts.get(path, "/"))
+    assert storage_is_persistent("/var/data/market.sqlite3") is True
+
+
+def test_storage_report_warns_on_render_without_disk(monkeypatch):
+    """Render'da disk yo'q bo'lsa — xavfli ogohlantirish chiqadi."""
+    from database import storage_report
+
+    monkeypatch.setattr("database.on_render", lambda: True)
+    monkeypatch.setattr("database._longest_mount", lambda path: "/")
+    report = storage_report("/var/data/market.sqlite3")
+    assert "DOIMIY DISK ULanmagan" in report
+    assert "eʼlonlar" in report
+
+
+def test_storage_report_ok_on_render_with_disk(monkeypatch):
+    """Render'da disk ulangan bo'lsa — xatolik xabari chiqmaydi."""
+    from database import storage_report
+
+    monkeypatch.setattr("database.on_render", lambda: True)
+    mounts = {"/var/data/market.sqlite3": "/var/data", "/opt/render/project/src": "/"}
+    monkeypatch.setattr("database._longest_mount", lambda path: mounts.get(path, "/"))
+    report = storage_report("/var/data/market.sqlite3")
+    assert "DOIMIY DISK ULanmagan" not in report
+    assert "Doimiy diskka ulangan" in report
+
+
+def test_storage_report_is_calm_outside_render(monkeypatch):
+    """Render'dan tashqarida xavfli ogohlantirish ko'rsatilmaydi."""
+    from database import storage_report
+
+    monkeypatch.setattr("database.on_render", lambda: False)
+    monkeypatch.setattr("database._longest_mount", lambda path: "/")
+    assert "DOIMIY DISK ULanmagan" not in storage_report("/tmp/market.sqlite3")
+
+
+def _fake_proc_mounts(content: str):
+    """`open` o'rniga beriladigan soxta `/proc/mounts` o'quvchi."""
+    import io
+
+    class _Reader:
+        def __init__(self, *args, **kwargs):
+            self._buffer = io.StringIO(content)
+
+        def __enter__(self):
+            return self._buffer
+
+        def __exit__(self, *args):
+            return False
+
+    return _Reader
+
+
+def test_longest_mount_picks_deepest_match(tmp_path, monkeypatch):
+    """Eng chuqur mos mount tanlanadi."""
+    from database import _longest_mount
+
+    deep = tmp_path / "data"
+    deep.mkdir()
+    target = deep / "market.sqlite3"
+    target.touch()
+    # Ikkita mount: yuqorisi va aniqroq pastkisi — chuqurroq bo'lishi kerak
+    monkeypatch.setattr("builtins.open", _fake_proc_mounts(f"dev1 / ext4 rw\ndev2 {deep} ext4 rw\n"))
+    assert _longest_mount(str(target)) == str(deep)
+
+
+def test_longest_mount_handles_missing_proc(tmp_path, monkeypatch):
+    """`/proc/mounts` yo'q bo'lsa — bo'sh satr qaytariladi (xatoma emas)."""
+    from database import _longest_mount
+
+    def _boom(*args, **kwargs):
+        raise OSError("yo'q")
+
+    monkeypatch.setattr("builtins.open", _boom)
+    assert _longest_mount(str(tmp_path / "x.db")) == ""
+
+
+async def test_seller_profile_shows_rating_and_stats(test_db, callback_answer, message_answer):
+    """Sotuvchi profili reyting va statistikani ko'rsatadi."""
+    from handlers.reviews import seller_profile
+
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    await _make_sell_listing(user_id=USER_ID, status="active")
+    for index, rating in enumerate((5, 5, 4)):
+        await db.add_review(int(listing["id"]), USER_ID, 9601 + index, rating, "Juda ishonchli")
+
+    await seller_profile(make_callback(data=f"sp_{USER_ID}"))
+
+    text = message_answer.await_args.args[0]
+    assert "Reyting" in text
+    assert "Juda ishonchli" in text
+    assert "Sotilgan eʼlonlar" in text
+    assert "Ishonchli sotuvchi" in text, "3+ ta yuqori sharh ishonchli belgisini beradi"
+
+
+async def test_seller_profile_for_unrated_seller(test_db, message_answer):
+    """Reytingi yo'q sotuvchi uchun tushunarli holat ko'rsatiladi."""
+    from handlers.reviews import seller_profile
+
+    await seller_profile(make_callback(data="sp_9701"))
+
+    text = message_answer.await_args.args[0]
+    assert "Hali reyting yoʻq" in text
+    assert "yangi sotuvchi" in text
+
+
+async def test_listing_card_has_seller_profile_button(test_db, bot_username):
+    """Kartochkada sotuvchi reytingini ochish tugmasi bor."""
+    listing = await _make_sell_listing()
+    assert f"sp_{USER_ID}" in _callbacks(listing_action_kb(listing))
+
+
+async def test_my_listings_shows_own_rating(test_db, fsm, fake_bot, message_answer):
+    """Sotuvchi o'z reytingini «Mening e'lonlarim» da ko'radi."""
+    from handlers.my_listings import show_my_listings
+    from keyboards import BTN_MY_LISTINGS
+
+    listing = await _make_sell_listing(user_id=USER_ID, status="sold")
+    await db.add_review(int(listing["id"]), USER_ID, 9801, 5, "Zo'r")
+
+    await show_my_listings(
+        make_message(user=make_user(user_id=USER_ID, username="seller"), text=BTN_MY_LISTINGS),
+        fake_bot,
+    )
+
+    header = message_answer.await_args_list[0].args[0]
+    assert "Sizning reytingiz" in header
+    assert "Sotilgan" in header
 
 
 async def test_review_rejects_own_listing(test_db, fsm, callback_answer):

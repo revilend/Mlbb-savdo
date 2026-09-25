@@ -168,6 +168,65 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# Doimiy disk tekshiruvi
+# ---------------------------------------------------------------------------
+def _longest_mount(path: str) -> str:
+    """Yo'l uchun mos keladigan eng uzun mount nuqtasi (`/proc/mounts` dan)."""
+    try:
+        real = str(Path(path).expanduser().resolve())
+    except OSError:
+        return ""
+    best = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                mount = parts[1].replace("\\040", " ")
+                if (real == mount or real.startswith(mount.rstrip("/") + "/")) and len(
+                    mount
+                ) > len(best):
+                    best = mount
+    except OSError:
+        return ""
+    return best
+
+
+def on_render() -> bool:
+    """Bot Render'da ishlayotganmi (Render `RENDER` o'zgaruvini qo'yadi)."""
+    return bool(os.environ.get("RENDER")) or str(Path.cwd()).startswith("/opt/render")
+
+
+def storage_is_persistent(path: str) -> bool:
+    """Ma'lumotlar bazasi alohida mount qilingan diskda joylashganmi.
+
+    Render'da disk ulanmagan bo'lsa, baza kodi bilan bir xil vaqtincha
+    (ephemeral) diskda turadi va har bir redeploy'da yo'qoladi. Baza va
+    kod turgan mount turli bo'lsa — demak, alohida disk ulangan.
+    """
+    db_mount = _longest_mount(path)
+    code_mount = _longest_mount(os.getcwd())
+    if not db_mount:
+        return False
+    return db_mount != code_mount
+
+
+def storage_report(path: str) -> str:
+    """Disk holati haqidagi bir qatorli hisobot (loglar uchun)."""
+    mount = _longest_mount(path) or "nomaʼlum"
+    if not on_render():
+        return f"Mahalliy muhit — bazaning joylashuvi: {mount}"
+    if storage_is_persistent(path):
+        return f"✅ Doimiy diskka ulangan (mount: {mount}) — redeploy'da maʼlumot saqlanadi."
+    return (
+        f"⚠️ DOIMIY DISK ULanmagan! Bazaning joylashuvi: {mount}. "
+        "Har bir redeploy'da BARCHA eʼlonlar va reytinglar yoʻqoladi. "
+        "Render Dashboard → xizmat → Disk → Add disk bilan disk ulang."
+    )
+
+
 def days_from_now_iso(days: int) -> str:
     """Hozirdan `days` kun keyingi vaqtni ISO ko'rinishida qaytaradi."""
     return (
@@ -1043,6 +1102,43 @@ class Database:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_seller_stats(self, seller_id: int) -> dict:
+        """Sotuvchi profili uchun umumiy statistika."""
+        seller_id = int(seller_id)
+        score, count = await self.get_seller_rating(seller_id)
+        async with self.conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status = 'sold'   THEN 1 ELSE 0 END) AS sold,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active
+            FROM listings WHERE user_id = ?
+            """,
+            (seller_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        user = await self.get_user(seller_id)
+        return {
+            "rating": score,
+            "reviews": count,
+            "sold": int((row["sold"] if row else 0) or 0),
+            "active": int((row["active"] if row else 0) or 0),
+            "joined_at": (user or {}).get("joined_at"),
+            "free_vip": int((user or {}).get("free_vip") or 0),
+        }
+
+    async def get_recent_reviews(self, limit: int = 10, offset: int = 0) -> list[dict]:
+        """Barcha sotuvchilar bo'yicha oxirgi qo'yilgan sharhlar."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM reviews
+             ORDER BY id DESC
+             LIMIT ? OFFSET ?
+            """,
+            (int(limit), int(offset)),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def has_reviewed(self, reviewer_id: int, seller_id: int) -> bool:
         """Foydalanuvchi bu sotuvchi haqida sharh qoldirganmi?"""
         async with self.conn.execute(
@@ -1246,6 +1342,29 @@ class Database:
         async with self.conn.execute("SELECT * FROM deals WHERE id = ?", (int(deal_id),)) as cursor:
             row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def get_buyer_deal(self, listing_id: int, buyer_id: int) -> Optional[dict]:
+        """E'lonni xaridor sifatida olgan foydalanuvchining bitimi (oxirgisi)."""
+        async with self.conn.execute(
+            """
+            SELECT * FROM deals
+             WHERE listing_id = ? AND buyer_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (int(listing_id), int(buyer_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_listing_buyers(self, listing_id: int) -> list[int]:
+        """E'lonni xaridor sifatida olgan foydalanuvchilar ID ro'yxati."""
+        async with self.conn.execute(
+            "SELECT DISTINCT buyer_id FROM deals WHERE listing_id = ?",
+            (int(listing_id),),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [int(row["buyer_id"]) for row in rows]
 
     async def update_deal_status(self, deal_id: int, status: str) -> Optional[dict]:
         """Bitim holatini yangilaydi va joriy yozuvni qaytaradi."""
